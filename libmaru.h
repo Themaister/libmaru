@@ -94,7 +94,7 @@ maru_error maru_list_audio_devices(struct maru_audio_device **list, unsigned *nu
  *
  * Creates a new context for a device.
  * Will attempt to claim the interfaces necessary from kernel.
- * Opening a device
+ * Opening a device might require root privileges, depending on the system.
  *
  * \param ctx Pointer to a context that is to be initialized.
  * \param vid Vendor ID
