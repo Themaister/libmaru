@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 #include "libmaru.h"
 
 #ifdef __cplusplus
@@ -82,29 +83,144 @@ maru_fd maru_fifo_read_notify_fd(maru_fifo *fifo);
  */
 void maru_fifo_read_notify_ack(maru_fifo *fifo);
 
+/** \ingroup buffer
+ * \brief Returns number of readable bytes in buffer.
+ *
+ * Returns number of readable bytes that have yet to be claimed by earlier calls to \c maru_fifo_read_lock.
+ *
+ * \param fifo The fifo
+ * \returns Readable bytes in buffer.
+ */
 size_t maru_fifo_read_avail(maru_fifo *fifo);
+
+/** \ingroup buffer
+ * \brief Returns number of writable bytes in buffer.
+ *
+ * Returns number of writeable bytes that have yet to be claimed by earlier calls to \c maru_fifo_write_lock.
+ *
+ * \param fifo The fifo
+ * \returns Writable bytes in buffer.
+ */
 size_t maru_fifo_write_avail(maru_fifo *fifo);
 
+/** Structure that represents the state of a locked region of the ring buffer.
+ * Due to the ring-y nature of the buffer, a locked region might be split into two. */
+struct maru_fifo_locked_region
+{
+   /** Pointer to first region of the locked region. */
+   void *first;
+   /** Size of the first region. */
+   size_t first_size;
+
+   /** Optionally a pointer to second locked region if first wraps around.
+    * Should first point to a fully contigous region, second is set to NULL. */
+   void *second;
+
+   /** Size of second locked region.
+    * Is set to 0 if data_second is set to NULL. */
+   size_t second_size;
+};
+
+/** \ingroup buffer
+ * \brief Lock out a region of the fifo for writing.
+ *
+ * Locking a buffer still allows other operations to continue on this buffer,
+ * however, locking out a part of the buffer reduces the writable size.
+ * It is also possible to lock a section of the buffer if it's already locked,
+ * however, great care must be taken to ensure that the order of unlocks is the same as the order of locks.
+ *
+ * Due to the ring-y nature of the buffer,
+ * locking the buffer might give you two different regions as it can wrap around at the end.
+ *
+ * \param fifo The fifo
+ * \param size The size to lock. If size is larger than \c maru_fifo_write_avail(), the result is undefined.
+ * \param region Locked region to be set. If successful, a comparably equal struct must be passed to \c maru_fifo_write_unlock
+ * at a later time.
+ *
+ * \returns Error code \ref maru_error
+ */
+
 maru_error maru_fifo_write_lock(maru_fifo *fifo,
-      size_t size,
-      void **data_first, size_t *data_first_size,
-      void **data_second, size_t *data_second_size);
+      size_t size, struct maru_fifo_locked_region *region);
 
-maru_error maru_fifo_write_unlock(maru_fifo *fifo,
-      void *data_first, size_t data_first_size,
-      void *data_second, size_t data_second_size);
+/** \ingroup buffer
+ * \brief Unlock a region of the fifo that was previously locked.
+ *
+ * Unlocking a buffer allows the reading side to read more data.
+ * It also notifies the reading side via notification descriptor.
+ * After unlocking, pointers region->first and region->second are considered invalid.
+ *
+ * \param fifo The fifo
+ * \param region The region that was earlier obtained from \c maru_fifo_write_lock
+ *
+ * \returns Error code \ref maru_error
+ */
+maru_error maru_fifo_write_unlock(maru_fifo *fifo, const struct maru_fifo_locked_region *region);
 
+/** \ingroup buffer
+ * \brief Lock out a region of the fifo for reading.
+ *
+ * Locking a buffer still allows other operations to continue on this buffer,
+ * however, locking out a part of the buffer reduces the readable size.
+ * It is also possible to lock a section of the buffer if it's already locked,
+ * however, great care must be taken to ensure that the order of unlocks is the same as the order of locks.
+ *
+ * Due to the ring-y nature of the buffer,
+ * locking the buffer might give you two different regions as it can wrap around at the end.
+ *
+ * \param fifo The fifo
+ * \param size The size to lock. If size is larger than \c maru_fifo_read_avail(), the result is undefined.
+ * \param region Locked region to be set. If successful, a comparably equal struct must be passed to \c maru_fifo_read_unlock
+ * at a later time.
+ *
+ * \returns Error code \ref maru_error
+ */
 maru_error maru_fifo_read_lock(maru_fifo *fifo,
-      size_t size,
-      const void **data_first, size_t *data_first_size,
-      const void **data_second, size_t *data_second_size);
+      size_t size, struct maru_fifo_locked_region *region);
 
-maru_error maru_fifo_read_unlock(maru_fifo *fifo,
-      const void *data_first, size_t data_first_size,
-      const void *data_second, size_t data_second_size);
+/** \ingroup buffer
+ * \brief Unlock a region of the fifo that was previously locked.
+ *
+ * Unlocking a buffer allows the writing side to write more data.
+ * It also notifies the writing side via notification descriptor.
+ * After unlocking, pointers region->first and region->second are considered invalid.
+ *
+ * \param fifo The fifo
+ * \param region The region that was earlier obtained from \c maru_fifo_read_lock
+ *
+ * \returns Error code \ref maru_error
+ */
+maru_error maru_fifo_read_unlock(maru_fifo *fifo, const struct maru_fifo_locked_region *region);
 
-size_t maru_fifo_write(maru_fifo *fifo, const void *data, size_t size);
-size_t maru_fifo_read(maru_fifo *fifo, void *data, size_t size);
+/** \ingroup buffer
+ * \brief Write data to fifo in a simple manner.
+ *
+ * Simple interface for writing to fifo.
+ * Allows size to be larger than writable size, but not all data might be written in this case.
+ * Cannot call this function if a writer lock is being held.
+ *
+ * \param fifo The fifo
+ * \param data Data to write
+ * \param size Size of data
+ *
+ * \returns Number of bytes written. Returns -1 on error.
+ */
+ssize_t maru_fifo_write(maru_fifo *fifo, const void *data, size_t size);
+
+/** \ingroup buffer
+ * \brief Read data from fifo in a simple manner.
+ *
+ * Simple interface for reading from fifo.
+ * Allows size to be larger than readable size, but not all data might be read in this case.
+ * Cannot call this function if a reader lock is being held.
+ *
+ * \param fifo The fifo
+ * \param data Buffer to read into
+ * \param size Size to read
+ *
+ * \returns Number of bytes read. Returns -1 on error.
+ */
+ssize_t maru_fifo_read(maru_fifo *fifo, void *data, size_t size);
 
 #ifdef __cplusplus
 }
