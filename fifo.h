@@ -23,8 +23,9 @@ typedef int maru_fd;
  *
  * \param size Size of buffer.
  * The size of the ring buffer is equal to \c size bytes.
- * Available bytes for writing is also \c size bytes.
- * It is recommended to use a power-of-two sized buffer.
+ * Available bytes for writing is \c size bytes - 1.
+ * The size of the fifo will be rounded up to
+ * the nearest power-of-two size for efficiency.
  *
  * \returns Newly allocated fifo, or NULL if failure.
  */
@@ -82,6 +83,12 @@ maru_fd maru_fifo_read_notify_fd(maru_fifo *fifo);
  * \param fifo The fifo
  */
 void maru_fifo_read_notify_ack(maru_fifo *fifo);
+
+/** \ingroup buffer
+ * \brief Kill notification handles, polling notification handles
+ * will give POLLHUP, allowing for clean tear-down in a threaded environment.
+ */
+void maru_fifo_kill_notification(maru_fifo *fifo);
 
 /** \ingroup buffer
  * \brief Returns number of readable bytes in buffer.
