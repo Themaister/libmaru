@@ -1,7 +1,7 @@
 
 TARGETS = test_fifo
 
-CFLAGS += -O0 -g -pthread
+CFLAGS += -O0 -g -pthread -std=gnu99 -Wall -pedantic
 LDFLAGS += -pthread
 
 all: $(TARGETS)

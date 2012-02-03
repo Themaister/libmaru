@@ -33,7 +33,7 @@ static void *writer_thread(void *data)
    pthread_exit(NULL);
 }
 
-static void *read_thread(void *data)
+static void *reader_thread(void *data)
 {
    maru_fifo *fifo = data;
    maru_fd notify_fd = maru_fifo_read_notify_fd(fifo);

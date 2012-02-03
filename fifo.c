@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <errno.h>
 #include <string.h>
+#include <fcntl.h>
 
 struct maru_fifo
 {
@@ -150,7 +151,7 @@ size_t maru_fifo_read_avail(maru_fifo *fifo)
 
 size_t maru_fifo_write_avail(maru_fifo *fifo)
 {
-   return (fifo->read_lock_begin + fifo->buffer_size - fifo_write_lock_end - 1) & fifo->buffer_mask;
+   return (fifo->read_lock_begin + fifo->buffer_size - fifo->write_lock_end - 1) & fifo->buffer_mask;
 }
 
 maru_error maru_fifo_write_lock(maru_fifo *fifo,
