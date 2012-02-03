@@ -30,17 +30,6 @@ struct maru_audio_device
 };
 
 /** \ingroup lib
- * A structure defining pollable file descriptors. */
-struct maru_pollfd
-{
-   /** Unix file descriptor. Must only be used for polling purposes. */
-   int fd; 
-
-   /** \c poll() compatible events field. */
-   short events;
-};
-
-/** \ingroup lib
  * Opaque type representing a libmaru context.
  * A single context represents the state of a connected device,
  * and its associated streams.
@@ -52,6 +41,11 @@ typedef struct maru_context maru_context;
  * If supported by the device, multiple audio streams can be multiplexed in the same context.
  */
 typedef unsigned maru_stream;
+
+/** \ingroup lib
+ * Type representing time in microseconds (10^-6 sec).
+ */
+typedef int64_t maru_usec;
 
 /** \ingroup lib
  * General type for errors emitted in libmaru.
@@ -164,11 +158,11 @@ struct maru_stream_desc
    size_t buffer_size;
 
    /** Might be set by \c maru_get_stream_desc() if the endpoint supports continous sample rates.
-    * \ref sample_rate will still be set to an appropriate value even if these fields are set. */
+    * \ref sample_rate will not be set to an appropriate value if these fields are set. */
    unsigned sample_rate_min;
 
    /** Might be set by \c maru_get_stream_desc() if the endpoint supports continous sample rates.
-    * \ref sample_rate will still be set to an appropriate value even if these fields are set. */
+    * \ref sample_rate will not be set to an appropriate value if these fields are set. */
    unsigned sample_rate_max;
 };
 
@@ -182,7 +176,7 @@ struct maru_stream_desc
  * \param num_desc Number of descriptors found.
  * \returns Error code \ref maru_error
  */
-int maru_get_stream_desc(maru_context *ctx, maru_stream stream,
+maru_error maru_get_stream_desc(maru_context *ctx, maru_stream stream,
       struct maru_stream_desc **desc, unsigned *num_desc);
 
 /** \ingroup stream
@@ -195,17 +189,84 @@ int maru_get_stream_desc(maru_context *ctx, maru_stream stream,
  *
  * \returns Error code \ref maru_error
  */
-int maru_open_stream(maru_context *ctx, maru_stream stream, const struct maru_stream_desc *desc);
+maru_error maru_stream_open(maru_context *ctx, maru_stream stream, const struct maru_stream_desc *desc);
 
 /** \ingroup stream
  * \brief Closes an opened stream.
  *
  * \param ctx libmaru context
- * \param stream Stream index.
+ * \param stream Stream index
  *
  * \returns Error code \ref maru_error
  */
-int maru_close_stream(maru_context *ctx, maru_stream stream);
+maru_error maru_stream_close(maru_context *ctx, maru_stream stream);
+
+/** \ingroup stream
+ * \brief Callback type that can be used to signal the caller when something of interest to the caller has occured.
+ *
+ * The notification callbacks are usually called from a different thread, and normal thread safety considerations apply. Calling libmaru functions from within this callback is unspecified.
+ */
+typedef void (*maru_notification_cb)(void *userdata);
+
+/** \ingroup stream
+ * \brief Write all data in a blocking fashion.
+ *
+ * Writes all data in a blocking fashion.
+ * If non-blocking operation is desired, a process should check maru_stream_write_avail().
+ *
+ * \param ctx libmaru context
+ * \param stream Stream index
+ * \param data Data to write
+ * \param size Size to write
+ *
+ * \returns Bytes written. If returned amount is lower than size, an error occured.
+ */
+size_t maru_stream_write(maru_context *ctx, maru_stream stream, 
+      const void *data, size_t size);
+
+/** \ingroup stream
+ * \brief Checks how much data can be written without blocking.
+ *
+ * If an attempt is made to write a larger amount than maru_stream_write_avail(),
+ * it may block for an indefinite time. Unless required by your application, it is recommended to
+ * use the blocking interface.
+ *
+ * \param ctx libmaru context
+ * \param stream Stream index
+ * \returns Bytes available for writing without blocking.
+ */
+size_t maru_stream_write_avail(maru_context *ctx, maru_stream stream);
+
+/** \ingroup stream
+ * \brief Set notification callback to be called after data has been processed and is ready for more data.
+ *
+ * \param ctx libmaru context
+ * \param stream Stream index
+ * \param callback Callback to call. If NULL, this notification will not be issued.
+ * \param userdata Application defined data. Data here will be passed to callback \ref maru_notification_cb.
+ */
+void maru_stream_set_write_notification(maru_context *ctx, maru_stream stream,
+      maru_notification_cb callback, void *userdata);
+
+/** \ingroup stream
+ * \brief Set notification callback to be called when an unforeseen error occurs.
+ *
+ * \param ctx libmaru context
+ * \param stream Stream index
+ * \param callback Callback to call. If NULL, this notification will not be issued.
+ * \param userdata Application defined data. Data here will be passed to callback \ref maru_notification_cb.
+ */
+void maru_stream_set_error_notification(maru_context *ctx, maru_stream stream,
+      maru_notification_cb callback, void *userdata);
+
+/** \ingroup stream
+ * \brief Returns current audio latency in microseconds.
+ *
+ * \param ctx libmaru context
+ * \param stream Stream index
+ * \returns Latency in microseconds, or a negative number if error \ref maru_error.
+ */
+maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream);
 
 #ifdef __cplusplus
 }
