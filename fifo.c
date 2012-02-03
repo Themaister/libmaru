@@ -7,6 +7,8 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <stdio.h>
+#include <poll.h>
 
 struct maru_fifo
 {
@@ -54,6 +56,11 @@ void maru_fifo_free(maru_fifo *fifo)
       return;
 
    maru_fifo_kill_notification(fifo);
+
+   if (fifo->write_fd[0] >= 0)
+      close(fifo->write_fd[0]);
+   if (fifo->read_fd[0] >= 0)
+      close(fifo->read_fd[0]);
 
    free(fifo->buffer);
    free(fifo);
@@ -123,6 +130,10 @@ maru_fifo *maru_fifo_new(size_t size)
          goto error;
    }
 
+   // Writer starts with POLLIN as buffer is empty.
+   if (write(fifo->write_fd[1], (uint8_t[]) {0}, 1) < 0)
+      goto error;
+
    // Disable SIGPIPE for the off-chance that SIGPIPE kills our application when we're killing notification handles.
    struct sigaction sa = { .sa_handler = SIG_IGN };
    sigaction(SIGPIPE, &sa, NULL);
@@ -171,7 +182,7 @@ maru_error maru_fifo_write_lock(maru_fifo *fifo,
    if (region->second_size)
       fifo->write_lock_end = region->second_size;
    else
-      fifo->write_lock_end += region->first_size;
+      fifo->write_lock_end = (fifo->write_lock_end + region->first_size) & fifo->buffer_mask;
 
    return LIBMARU_SUCCESS;
 }
@@ -181,12 +192,18 @@ maru_error maru_fifo_write_unlock(maru_fifo *fifo,
 {
    // Check if ordering of unlocks differ from order of locks.
    if (fifo->buffer + fifo->write_lock_begin != region->first)
+   {
+      fprintf(stderr, "Wrong order, %p != %p!\n", fifo->buffer + fifo->write_lock_begin, region->first);
       return LIBMARU_ERROR_INVALID;
+   }
 
    size_t new_begin = (fifo->write_lock_begin + region->first_size) & fifo->buffer_mask;
 
    if (region->second_size && new_begin != 0)
+   {
+      fprintf(stderr, "New begin mismatch!\n");
       return LIBMARU_ERROR_INVALID;
+   }
 
    new_begin += region->second_size;
    fifo->write_lock_begin = new_begin;
@@ -216,7 +233,7 @@ maru_error maru_fifo_read_lock(maru_fifo *fifo,
    if (region->second_size)
       fifo->read_lock_end = region->second_size;
    else
-      fifo->read_lock_end += region->first_size;
+      fifo->read_lock_end = (fifo->read_lock_end + region->first_size) & fifo->buffer_mask;
 
    return LIBMARU_SUCCESS;
 }
@@ -287,6 +304,74 @@ ssize_t maru_fifo_read(maru_fifo *fifo, void *data_, size_t size)
    return size;
 }
 
+size_t maru_fifo_blocking_write(maru_fifo *fifo,
+      const void *data_, size_t size)
+{
+   const uint8_t *data = data_;
+   size_t written = 0;
+
+   maru_fd fd = maru_fifo_write_notify_fd(fifo);
+
+   while (written < size)
+   {
+      struct pollfd fds = { .fd = fd, .events = POLLIN };
+
+      if (poll(&fds, 1, -1) < 0)
+         break;
+
+      if (fds.revents & POLLIN)
+      {
+         ssize_t ret = maru_fifo_write(fifo, data + written,
+               size - written);
+
+         maru_fifo_write_notify_ack(fifo);
+
+         if (ret < 0)
+            break;
+
+         written += ret;
+      }
+      else if (fds.revents & (POLLHUP | POLLERR | POLLNVAL))
+         break;
+   }
+
+   return written;
+}
+
+size_t maru_fifo_blocking_read(maru_fifo *fifo,
+      void *data_, size_t size)
+{
+   uint8_t *data = data_;
+   size_t has_read = 0;
+
+   maru_fd fd = maru_fifo_read_notify_fd(fifo);
+
+   while (has_read < size)
+   {
+      struct pollfd fds = { .fd = fd, .events = POLLIN };
+
+      if (poll(&fds, 1, -1) < 0)
+         break;
+
+      if (fds.revents & POLLIN)
+      {
+         ssize_t ret = maru_fifo_read(fifo, data + has_read,
+               size - has_read);
+
+         maru_fifo_read_notify_ack(fifo);
+
+         if (ret < 0)
+            break;
+
+         has_read += ret;
+      }
+      else if (fds.revents & (POLLHUP | POLLERR | POLLNVAL))
+         break;
+   }
+
+   return has_read;
+}
+
 void maru_fifo_read_notify_ack(maru_fifo *fifo)
 {
    char dummy[1024];
@@ -309,16 +394,11 @@ void maru_fifo_write_notify_ack(maru_fifo *fifo)
 
 void maru_fifo_kill_notification(maru_fifo *fifo)
 {
-   if (fifo->write_fd[0] >= 0)
-      close(fifo->write_fd[0]);
    if (fifo->write_fd[1] >= 0)
       close(fifo->write_fd[1]);
-   if (fifo->read_fd[0] >= 0)
-      close(fifo->read_fd[0]);
    if (fifo->read_fd[1] >= 0)
       close(fifo->read_fd[1]);
 
-   fifo->write_fd[0] = fifo->write_fd[1] =
-      fifo->read_fd[0] = fifo->read_fd[1] = -1;
+   fifo->write_fd[1] = fifo->read_fd[1] = -1;
 }
 

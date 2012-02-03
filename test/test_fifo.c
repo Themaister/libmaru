@@ -4,67 +4,42 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <poll.h>
+#include <stdio.h>
 
 static void *writer_thread(void *data)
 {
    maru_fifo *fifo = data;
 
-   maru_fd notify_fd = maru_fifo_write_notify_fd(fifo);
-   char buf[32];
+   char buf[4];
    ssize_t rc;
+
+   size_t total = 0;
    while ((rc = read(0, buf, sizeof(buf))) > 0)
    {
-      struct pollfd fds = { .fd = notify_fd, .events = POLLIN };
-
-      if (poll(&fds, 1, -1) < 0)
-         break;
-
-      if (fds.revents & POLLIN)
-      {
-         if (maru_fifo_write(fifo, buf, rc) < 0)
-            break;
-
-         maru_fifo_write_notify_ack(fifo);
-      }
-      else if (fds.revents & POLLHUP)
+      total += rc;
+      if (maru_fifo_blocking_write(fifo, buf, rc) < rc)
          break;
    }
 
+   fprintf(stderr, "Writer exiting (last rc = %zi, read %zu bytes from stdin ...\n", rc, total);
    pthread_exit(NULL);
 }
 
 static void *reader_thread(void *data)
 {
    maru_fifo *fifo = data;
-   maru_fd notify_fd = maru_fifo_read_notify_fd(fifo);
-   char buf[32];
+   char buf[4];
 
    for (;;)
    {
-      struct pollfd fds = { .fd = notify_fd, .events = POLLIN };
-
-      if (poll(&fds, 1, -1) < 0)
+      size_t ret = maru_fifo_blocking_read(fifo, buf, sizeof(buf));
+      if (ret == 0)
          break;
 
-      if (fds.revents & POLLIN)
-      {
-         ssize_t ret = maru_fifo_read(fifo, buf, sizeof(buf));
-         if (ret < 0)
-            break;
-
-         maru_fifo_read_notify_ack(fifo);
-         write(1, buf, ret);
-      }
-      else if (fds.revents & POLLHUP)
-      {
-         ssize_t ret;
-         while ((ret = maru_fifo_read(fifo, buf, sizeof(buf))) > 0)
-            write(1, buf, ret);
-
-         break;
-      }
+      write(1, buf, ret);
    }
 
+   fprintf(stderr, "Reader returning ...\n");
    pthread_exit(NULL);
 }
 

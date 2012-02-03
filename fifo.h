@@ -46,7 +46,11 @@ void maru_fifo_free(maru_fifo *fifo);
  * The type of the handle may vary with the operating system used. \ref maru_fd.
  *
  * On Unix, the file descriptor can be polled with POLLIN or similar.
- * After an event has been read, it should be acknowledged with \c maru_fifo_write_notify_ack().
+ * After an event has been read, and the user has performed the needed operations on the buffer,
+ * the buffer should be signaled with \c maru_fifo_write_notify_ack().
+ *
+ * Even after a POLLIN is received, it is possible that available write size is 0.
+ * In this case, maru_fifo_write_notify_ack() must still be called.
  *
  * \param fifo The fifo
  * \returns Platform-specific pollable handle.
@@ -228,6 +232,44 @@ ssize_t maru_fifo_write(maru_fifo *fifo, const void *data, size_t size);
  * \returns Number of bytes read. Returns -1 on error.
  */
 ssize_t maru_fifo_read(maru_fifo *fifo, void *data, size_t size);
+
+/** \ingroup buffer
+ * \brief Write all data to fifo in a blocking fashion.
+ *
+ * Very simple interface for writing to the fifo.
+ * Will attempt in a blocking fashion to write all data to the buffer.
+ * Cannot call this function if a write lock is being held.
+ *
+ * If more control over blocking is desired, maru_fifo_write() and maru_fifo_read() are more appropriate.
+ *
+ * \param fifo The fifo
+ * \param data Buffer to read into
+ * \param size Size to read
+ *
+ * \returns Number of bytes written.
+ * On error, return value will be smaller than size, and the return value represents the
+ * number of bytes written before error occured.
+ */
+size_t maru_fifo_blocking_write(maru_fifo *fifo, const void *data, size_t size);
+
+/** \ingroup buffer
+ * \brief Write all data to fifo in a blocking fashion.
+ *
+ * Very simple interface for writing to the fifo.
+ * Will attempt in a blocking fashion to write all data to the buffer.
+ * Cannot call this function if a write lock is being held.
+ *
+ * If more control over blocking is desired, maru_fifo_write() and maru_fifo_read() are more appropriate.
+ *
+ * \param fifo The fifo
+ * \param data Buffer to read into
+ * \param size Size to read
+ *
+ * \returns Number of bytes written.
+ * On error or if notification is shut down, return value will be smaller than size, and the return value represents the
+ * number of bytes written before this condition occured.
+ */
+size_t maru_fifo_blocking_read(maru_fifo *fifo, void *data, size_t size);
 
 #ifdef __cplusplus
 }
