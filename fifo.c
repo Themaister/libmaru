@@ -58,6 +58,26 @@ void maru_fifo_free(maru_fifo *fifo)
    free(fifo);
 }
 
+static size_t next_pow2(size_t v)
+{
+   v--;
+   v |= v >> 1;
+   v |= v >> 2;
+   v |= v >> 4;
+#if SIZE_MAX >= UINT16_C(0xffff)
+      v |= v >> 8;
+#endif
+#if SIZE_MAX >= UINT32_C(0xffffffff)
+      v |= v >> 16;
+#endif
+#if SIZE_MAX >= UINT64_C(0xffffffffffffffff)
+      v |= v >> 32;
+#endif
+   v++;
+
+   return v;
+}
+
 maru_fifo *maru_fifo_new(size_t size)
 {
    if (!size)
@@ -94,6 +114,7 @@ maru_fifo *maru_fifo_new(size_t size)
    // Nonblock to avoid a theoretically
    // possible scenario where we block when notifying
    // reader/writer side.
+   // Also makes implementation simpler.
    for (unsigned i = 0; i < 4; i++)
    {
       if (fcntl(fds[i], F_SETFL,
@@ -101,7 +122,7 @@ maru_fifo *maru_fifo_new(size_t size)
          goto error;
    }
 
-   // Disable SIGPIPE for the off-chance that SIGPIPE kills our application.
+   // Disable SIGPIPE for the off-chance that SIGPIPE kills our application when we're killing notification handles.
    struct sigaction sa = { .sa_handler = SIG_IGN };
    sigaction(SIGPIPE, &sa, NULL);
 
