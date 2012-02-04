@@ -6,11 +6,13 @@
 #include <poll.h>
 #include <stdio.h>
 
+#define CHUNK_SIZE 4
+
 static void *writer_thread(void *data)
 {
    maru_fifo *fifo = data;
 
-   char buf[4];
+   char buf[CHUNK_SIZE];
    ssize_t rc;
 
    size_t total = 0;
@@ -36,7 +38,7 @@ static void *writer_thread(void *data)
 static void *reader_thread(void *data)
 {
    maru_fifo *fifo = data;
-   char buf[4];
+   char buf[CHUNK_SIZE];
 
    size_t total = 0;
    for (;;)
