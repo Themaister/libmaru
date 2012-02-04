@@ -79,6 +79,38 @@ void maru_fifo_write_notify_ack(maru_fifo *fifo);
 maru_fd maru_fifo_read_notify_fd(maru_fifo *fifo);
 
 /** \ingroup buffer
+ * \brief Set the least amount of bytes that needs to be writable for notification to occur.
+ *
+ * This function is used to give better control over situations where you need a certain amount
+ * of data to be available for POLLIN to occur on the notification descriptor.
+ * 
+ * Do note that using a trigger on both writes and reads could potentially lead to a deadlock if the triggers overlap.
+ * This is typically the case if write_edge + read_edge >= buffer_size.
+ * 
+ * \param fifo The fifo
+ * \param size The number of bytes that must be available at a minimum for POLLIN to occur.
+ * Setting 0 bytes is treated as a value of 1 (default).
+ * \returns Error code \ref maru_error.
+ */
+maru_error maru_fifo_set_write_trigger(maru_fifo *fifo, size_t size);
+
+/** \ingroup buffer
+ * \brief Set the least amount of bytes that needs to be readable for notification to occur.
+ *
+ * This function is used to give better control over situations where you need a certain amount
+ * of data to be available for POLLIN to occur on the notification descriptor.
+ * 
+ * Do note that using a trigger on both writes and reads could potentially lead to a deadlock if the triggers overlap.
+ * This is typically the case if write_edge + read_edge >= buffer_size.
+ * 
+ * \param fifo The fifo
+ * \param size The number of bytes that must be available at a minimum for POLLIN to occur.
+ * Setting 0 bytes is treated as a value of 1 (default).
+ * \returns Error code \ref maru_error.
+ */
+maru_error maru_fifo_set_read_trigger(maru_fifo *fifo, size_t size);
+
+/** \ingroup buffer
  * \brief Acknowledge a notification
  *
  * This must be called after a POLLIN has been received by reader.
@@ -150,7 +182,6 @@ struct maru_fifo_locked_region
  *
  * \returns Error code \ref maru_error
  */
-
 maru_error maru_fifo_write_lock(maru_fifo *fifo,
       size_t size, struct maru_fifo_locked_region *region);
 
@@ -257,7 +288,7 @@ size_t maru_fifo_blocking_write(maru_fifo *fifo, const void *data, size_t size);
  *
  * Very simple interface for writing to the fifo.
  * Will attempt in a blocking fashion to write all data to the buffer.
- * Cannot call this function if a write lock is being held.
+ * Cannot call this function if a read lock is being held.
  *
  * If more control over blocking is desired, maru_fifo_write() and maru_fifo_read() are more appropriate.
  *
@@ -268,6 +299,8 @@ size_t maru_fifo_blocking_write(maru_fifo *fifo, const void *data, size_t size);
  * \returns Number of bytes written.
  * On error or if notification is shut down, return value will be smaller than size, and the return value represents the
  * number of bytes written before this condition occured.
+ * If there is still data to be read from the buffer after a notification kill,
+ * it can be read with maru_fifo_read().
  */
 size_t maru_fifo_blocking_read(maru_fifo *fifo, void *data, size_t size);
 

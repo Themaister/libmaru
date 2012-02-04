@@ -18,10 +18,18 @@ static void *writer_thread(void *data)
    {
       total += rc;
       if (maru_fifo_blocking_write(fifo, buf, rc) < rc)
+      {
+         fprintf(stderr, "Blocking write failed!\n");
          break;
+      }
    }
 
-   fprintf(stderr, "Writer exiting (last rc = %zi, read %zu bytes from stdin ...\n", rc, total);
+   struct maru_fifo_locked_region reg;
+   maru_fifo_write_lock(fifo, 0, &reg);
+   fprintf(stderr, "Write pointer = %p\n", reg.first);
+   maru_fifo_write_unlock(fifo, &reg);
+
+   fprintf(stderr, "Writer exiting (last rc = %zi, read %zu bytes from stdin) ...\n", rc, total);
    pthread_exit(NULL);
 }
 
@@ -30,22 +38,49 @@ static void *reader_thread(void *data)
    maru_fifo *fifo = data;
    char buf[4];
 
+   size_t total = 0;
    for (;;)
    {
       size_t ret = maru_fifo_blocking_read(fifo, buf, sizeof(buf));
       if (ret == 0)
+      {
+         fprintf(stderr, "Reader read %zu bytes before flushing ...\n", total);
+         fprintf(stderr, "Flushing ...\n");
+         ssize_t rc;
+         // Flush out buffer.
+         while ((rc = maru_fifo_read(fifo, buf, sizeof(buf))) > 0)
+         {
+            write(1, buf, rc);
+            total += rc;
+         }
+
+         fprintf(stderr, "Flush ended with rc = %zi\n", rc);
+
+         struct maru_fifo_locked_region reg;
+
+         maru_fifo_write_lock(fifo, 0, &reg);
+         fprintf(stderr, "Read-side write pointer = %p\n", reg.first);
+         maru_fifo_write_unlock(fifo, &reg);
+
+         maru_fifo_read_lock(fifo, 0, &reg);
+         fprintf(stderr, "Read pointer = %p\n", reg.first);
+         maru_fifo_read_unlock(fifo, &reg);
+
          break;
+      }
 
       write(1, buf, ret);
+      total += ret;
    }
 
+   fprintf(stderr, "Reader read %zu bytes ...\n", total);
    fprintf(stderr, "Reader returning ...\n");
    pthread_exit(NULL);
 }
 
 int main(void)
 {
-   maru_fifo *fifo = maru_fifo_new(1024);
+   maru_fifo *fifo = maru_fifo_new(4096);
    assert(fifo);
 
    pthread_t writer, reader;

@@ -48,6 +48,12 @@ struct maru_fifo
     * Dummy bytes will be written into read_pipe[1] to notify about
     * data being available, to be polled by read_pipe[0]. */
    maru_fd read_fd[2];
+
+   /** Trigger for how many bytes must be available to issue a notification. */
+   size_t read_trigger;
+
+   /** Trigger for how many bytes must be available to issue a notification. */
+   size_t write_trigger;
 };
 
 void maru_fifo_free(maru_fifo *fifo)
@@ -102,6 +108,9 @@ maru_fifo *maru_fifo_new(size_t size)
 
    fifo->buffer_size = size;
    fifo->buffer_mask = size - 1;
+
+   fifo->read_trigger = 1;
+   fifo->write_trigger = 1;
 
    fifo->buffer = calloc(1, size);
    if (!fifo->buffer)
@@ -208,10 +217,13 @@ maru_error maru_fifo_write_unlock(maru_fifo *fifo,
    new_begin += region->second_size;
    fifo->write_lock_begin = new_begin;
 
-   // Signal reader that there is new data to be read.
-   if (write(fifo->read_fd[1], (uint8_t[]) {0}, 1) < 0 &&
-         errno != EAGAIN)
-      return LIBMARU_ERROR_IO;
+   if (maru_fifo_read_avail(fifo) >= fifo->read_trigger && fifo->read_fd[1] >= 0)
+   {
+      // Signal reader that there is new data to be read.
+      if (write(fifo->read_fd[1], (uint8_t[]) {0}, 1) < 0 &&
+            errno != EAGAIN)
+         return LIBMARU_ERROR_IO;
+   }
 
    return LIBMARU_SUCCESS;
 }
@@ -253,10 +265,13 @@ maru_error maru_fifo_read_unlock(maru_fifo *fifo,
    new_begin += region->second_size;
    fifo->read_lock_begin = new_begin;
 
-   // Signal writer that there is data available for writing.
-   if (write(fifo->write_fd[1], (uint8_t[]) {0}, 1) < 0 &&
-         errno != EAGAIN)
-      return LIBMARU_ERROR_IO;
+   if (maru_fifo_write_avail(fifo) >= fifo->write_trigger && fifo->write_fd[1] >= 0)
+   {
+      // Signal writer that there is data available for writing.
+      if (write(fifo->write_fd[1], (uint8_t[]) {0}, 1) < 0 &&
+            errno != EAGAIN)
+         return LIBMARU_ERROR_IO;
+   }
 
    return LIBMARU_SUCCESS;
 }
@@ -378,7 +393,7 @@ void maru_fifo_read_notify_ack(maru_fifo *fifo)
    // Flush out all data.
    while (read(fifo->read_fd[0], dummy, sizeof(dummy)) > 0);
    // If there is still data to be read, poll() should give POLLIN.
-   if (maru_fifo_read_avail(fifo) > 0)
+   if (maru_fifo_read_avail(fifo) >= fifo->read_trigger)
       write(fifo->read_fd[1], (uint8_t[]) {0}, 1);
 }
 
@@ -388,7 +403,7 @@ void maru_fifo_write_notify_ack(maru_fifo *fifo)
    // Flush out all data.
    while (read(fifo->write_fd[0], dummy, sizeof(dummy)) > 0);
    // If there is still data to write, poll() should give POLLIN.
-   if (maru_fifo_write_avail(fifo) > 0)
+   if (maru_fifo_write_avail(fifo) >= fifo->write_trigger)
       write(fifo->write_fd[1], (uint8_t[]) {0}, 1);
 }
 
@@ -400,5 +415,29 @@ void maru_fifo_kill_notification(maru_fifo *fifo)
       close(fifo->read_fd[1]);
 
    fifo->write_fd[1] = fifo->read_fd[1] = -1;
+}
+
+maru_error maru_fifo_set_write_trigger(maru_fifo *fifo, size_t size)
+{
+   if (size == 0)
+      size = 1;
+
+   if (size + fifo->read_trigger >= fifo->buffer_size)
+      return LIBMARU_ERROR_INVALID;
+
+   fifo->write_trigger = size;
+   return LIBMARU_SUCCESS;
+}
+
+maru_error maru_fifo_set_read_trigger(maru_fifo *fifo, size_t size)
+{
+   if (size == 0)
+      size = 1;
+
+   if (size + fifo->write_trigger >= fifo->buffer_size)
+      return LIBMARU_ERROR_INVALID;
+
+   fifo->read_trigger = size;
+   return LIBMARU_SUCCESS;
 }
 
