@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <poll.h>
+#include <pthread.h>
 
 struct maru_fifo
 {
@@ -54,12 +55,27 @@ struct maru_fifo
 
    /** Trigger for how many bytes must be available to issue a notification. */
    size_t write_trigger;
+
+   /** Lock */
+   pthread_mutex_t lock;
 };
+
+static inline void fifo_lock(maru_fifo *fifo)
+{
+   pthread_mutex_lock(&fifo->lock);
+}
+
+static inline void fifo_unlock(maru_fifo *fifo)
+{
+   pthread_mutex_unlock(&fifo->lock);
+}
 
 void maru_fifo_free(maru_fifo *fifo)
 {
    if (!fifo)
       return;
+
+   pthread_mutex_destroy(&fifo->lock);
 
    maru_fifo_kill_notification(fifo);
 
@@ -105,6 +121,9 @@ maru_fifo *maru_fifo_new(size_t size)
 
    fifo->write_fd[0] = fifo->write_fd[1] =
       fifo->read_fd[0] = fifo->read_fd[1] = -1;
+
+   if (pthread_mutex_init(&fifo->lock, NULL) < 0)
+      goto error;
 
    fifo->buffer_size = size;
    fifo->buffer_mask = size - 1;
@@ -164,19 +183,37 @@ maru_fd maru_fifo_read_notify_fd(maru_fifo *fifo)
    return fifo->read_fd[0];
 }
 
-size_t maru_fifo_read_avail(maru_fifo *fifo)
+static inline size_t maru_fifo_read_avail_nolock(maru_fifo *fifo)
 {
    return (fifo->write_lock_begin + fifo->buffer_size - fifo->read_lock_end) & fifo->buffer_mask;
 }
 
-size_t maru_fifo_write_avail(maru_fifo *fifo)
+static inline size_t maru_fifo_write_avail_nolock(maru_fifo *fifo)
 {
    return (fifo->read_lock_begin + fifo->buffer_size - fifo->write_lock_end - 1) & fifo->buffer_mask;
+}
+
+size_t maru_fifo_read_avail(maru_fifo *fifo)
+{
+   fifo_lock(fifo);
+   size_t ret = maru_fifo_read_avail_nolock(fifo);
+   fifo_unlock(fifo);
+   return ret;
+}
+
+size_t maru_fifo_write_avail(maru_fifo *fifo)
+{
+   fifo_lock(fifo);
+   size_t ret = maru_fifo_write_avail_nolock(fifo);
+   fifo_unlock(fifo);
+   return ret;
 }
 
 maru_error maru_fifo_write_lock(maru_fifo *fifo,
       size_t size, struct maru_fifo_locked_region *region)
 {
+   fifo_lock(fifo);
+
    size_t avail_first = fifo->buffer_size - fifo->write_lock_end;
    size_t write_first = size;
    if (write_first > avail_first)
@@ -193,17 +230,23 @@ maru_error maru_fifo_write_lock(maru_fifo *fifo,
    else
       fifo->write_lock_end = (fifo->write_lock_end + region->first_size) & fifo->buffer_mask;
 
+   fifo_unlock(fifo);
+
    return LIBMARU_SUCCESS;
 }
 
 maru_error maru_fifo_write_unlock(maru_fifo *fifo,
       const struct maru_fifo_locked_region *region)
 {
+   maru_error ret = LIBMARU_SUCCESS;
+   fifo_lock(fifo);
+
    // Check if ordering of unlocks differ from order of locks.
    if (fifo->buffer + fifo->write_lock_begin != region->first)
    {
       fprintf(stderr, "Wrong order, %p != %p!\n", fifo->buffer + fifo->write_lock_begin, region->first);
-      return LIBMARU_ERROR_INVALID;
+      ret = LIBMARU_ERROR_INVALID;
+      goto end;
    }
 
    size_t new_begin = (fifo->write_lock_begin + region->first_size) & fifo->buffer_mask;
@@ -211,26 +254,34 @@ maru_error maru_fifo_write_unlock(maru_fifo *fifo,
    if (region->second_size && new_begin != 0)
    {
       fprintf(stderr, "New begin mismatch!\n");
-      return LIBMARU_ERROR_INVALID;
+      ret = LIBMARU_ERROR_INVALID;
+      goto end;
    }
 
    new_begin += region->second_size;
    fifo->write_lock_begin = new_begin;
 
-   if (maru_fifo_read_avail(fifo) >= fifo->read_trigger && fifo->read_fd[1] >= 0)
+   if (maru_fifo_read_avail_nolock(fifo) >= fifo->read_trigger && fifo->read_fd[1] >= 0)
    {
       // Signal reader that there is new data to be read.
       if (write(fifo->read_fd[1], (uint8_t[]) {0}, 1) < 0 &&
             errno != EAGAIN)
-         return LIBMARU_ERROR_IO;
+      {
+         ret = LIBMARU_ERROR_IO;
+         goto end;
+      }
    }
 
-   return LIBMARU_SUCCESS;
+end:
+   fifo_unlock(fifo);
+   return ret;
 }
 
 maru_error maru_fifo_read_lock(maru_fifo *fifo,
       size_t size, struct maru_fifo_locked_region *region)
 {
+   fifo_lock(fifo);
+
    size_t avail_first = fifo->buffer_size - fifo->read_lock_end;
    size_t read_first = size;
    if (read_first > avail_first)
@@ -247,33 +298,49 @@ maru_error maru_fifo_read_lock(maru_fifo *fifo,
    else
       fifo->read_lock_end = (fifo->read_lock_end + region->first_size) & fifo->buffer_mask;
 
+   fifo_unlock(fifo);
+
    return LIBMARU_SUCCESS;
 }
 
 maru_error maru_fifo_read_unlock(maru_fifo *fifo,
       const struct maru_fifo_locked_region *region)
 {
+   maru_error ret = LIBMARU_SUCCESS;
+   fifo_lock(fifo);
+
    // Check if ordering of unlocks differ from order of locks.
    if (fifo->buffer + fifo->read_lock_begin != region->first)
-      return LIBMARU_ERROR_INVALID;
+   {
+      ret = LIBMARU_ERROR_INVALID;
+      goto end;
+   }
 
    size_t new_begin = (fifo->read_lock_begin + region->first_size) & fifo->buffer_mask;
 
    if (region->second_size && new_begin != 0)
-      return LIBMARU_ERROR_INVALID;
+   {
+      ret = LIBMARU_ERROR_INVALID;
+      goto end;
+   }
 
    new_begin += region->second_size;
    fifo->read_lock_begin = new_begin;
 
-   if (maru_fifo_write_avail(fifo) >= fifo->write_trigger && fifo->write_fd[1] >= 0)
+   if (maru_fifo_write_avail_nolock(fifo) >= fifo->write_trigger && fifo->write_fd[1] >= 0)
    {
       // Signal writer that there is data available for writing.
       if (write(fifo->write_fd[1], (uint8_t[]) {0}, 1) < 0 &&
             errno != EAGAIN)
-         return LIBMARU_ERROR_IO;
+      {
+         ret = LIBMARU_ERROR_INVALID;
+         goto end;
+      }
    }
 
-   return LIBMARU_SUCCESS;
+end:
+   fifo_unlock(fifo);
+   return ret;
 }
 
 ssize_t maru_fifo_write(maru_fifo *fifo,
@@ -389,32 +456,38 @@ size_t maru_fifo_blocking_read(maru_fifo *fifo,
 
 void maru_fifo_read_notify_ack(maru_fifo *fifo)
 {
+   fifo_lock(fifo);
    char dummy[1024];
    // Flush out all data.
    while (read(fifo->read_fd[0], dummy, sizeof(dummy)) > 0);
    // If there is still data to be read, poll() should give POLLIN.
-   if (maru_fifo_read_avail(fifo) >= fifo->read_trigger)
+   if (maru_fifo_read_avail_nolock(fifo) >= fifo->read_trigger)
       write(fifo->read_fd[1], (uint8_t[]) {0}, 1);
+   fifo_unlock(fifo);
 }
 
 void maru_fifo_write_notify_ack(maru_fifo *fifo)
 {
+   fifo_lock(fifo);
    char dummy[1024];
    // Flush out all data.
    while (read(fifo->write_fd[0], dummy, sizeof(dummy)) > 0);
    // If there is still data to write, poll() should give POLLIN.
-   if (maru_fifo_write_avail(fifo) >= fifo->write_trigger)
+   if (maru_fifo_write_avail_nolock(fifo) >= fifo->write_trigger)
       write(fifo->write_fd[1], (uint8_t[]) {0}, 1);
+   fifo_unlock(fifo);
 }
 
 void maru_fifo_kill_notification(maru_fifo *fifo)
 {
+   fifo_lock(fifo);
    if (fifo->write_fd[1] >= 0)
       close(fifo->write_fd[1]);
    if (fifo->read_fd[1] >= 0)
       close(fifo->read_fd[1]);
 
    fifo->write_fd[1] = fifo->read_fd[1] = -1;
+   fifo_unlock(fifo);
 }
 
 maru_error maru_fifo_set_write_trigger(maru_fifo *fifo, size_t size)

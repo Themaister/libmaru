@@ -7,6 +7,7 @@
 #include <stdio.h>
 
 #define CHUNK_SIZE 4
+#define BUFFER_SIZE 4096
 
 static void *writer_thread(void *data)
 {
@@ -82,7 +83,7 @@ static void *reader_thread(void *data)
 
 int main(void)
 {
-   maru_fifo *fifo = maru_fifo_new(4096);
+   maru_fifo *fifo = maru_fifo_new(BUFFER_SIZE);
    assert(fifo);
 
    pthread_t writer, reader;
