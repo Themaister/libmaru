@@ -24,8 +24,20 @@ int main(void)
                list[0].product_id) == LIBMARU_SUCCESS);
 
       fprintf(stderr, "Streams: %d\n", maru_get_num_streams(ctx));
+
+      unsigned num_desc;
+      struct maru_stream_desc *desc;
+      assert(maru_get_stream_desc(ctx, 0, &desc, &num_desc) == LIBMARU_SUCCESS);
+
+      fprintf(stderr, "Format:\n");
+      fprintf(stderr, "\tRate: %u\n", desc[0].sample_rate);
+      fprintf(stderr, "\tChannels: %u\n", desc[0].channels);
+      fprintf(stderr, "\tBits: %u\n", desc[0].bits);
+
+      free(desc);
       maru_destroy_context(ctx);
    }
 
    free(list);
 }
+

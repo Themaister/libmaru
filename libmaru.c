@@ -31,6 +31,7 @@ struct maru_context
 {
    libusb_context *ctx;
    libusb_device_handle *handle;
+   struct libusb_config_descriptor *conf;
 
    struct maru_stream_internal *streams;
    unsigned num_streams;
@@ -44,12 +45,31 @@ struct maru_context
    pthread_t thread;
 };
 
-#define USB_CLASS_AUDIO 1
-#define USB_SUBCLASS_AUDIO_CONTROL 1
-#define USB_SUBCLASS_AUDIO_STREAMING 2
+struct usb_uas_format_descriptor
+{
+   uint8_t bLength;
+   uint8_t bDescriptorType;
+   uint8_t bDescriptorSubtype;
+   uint8_t bFormatType;
+   uint8_t bNrChannels;
+   uint8_t nSubFrameSize;
+   uint8_t nBitResolution;
+   uint8_t bSamFreqType;
+   uint8_t tSamFreq[3]; // Hardcoded for one sample rate.
+} __attribute__((packed));
 
-#define USB_ENDPOINT_ISOCHRONOUS 0x01
-#define USB_ENDPOINT_ASYNC 0x04
+#define USB_CLASS_AUDIO                1
+#define USB_SUBCLASS_AUDIO_CONTROL     1
+#define USB_SUBCLASS_AUDIO_STREAMING   2
+
+#define USB_ENDPOINT_ISOCHRONOUS       0x01
+#define USB_ENDPOINT_ASYNC             0x04
+
+#define USB_CLASS_DESCRIPTOR           0x20
+#define USB_INTERFACE_DESCRIPTOR_TYPE  0x04
+#define USB_FORMAT_DESCRIPTOR_SUBTYPE  0x02
+#define USB_FORMAT_TYPE_I              0x01
+#define USB_FREQ_TYPE_DIRECT           0x01
 
 static inline bool interface_is_class(const struct libusb_interface_descriptor *iface, unsigned class)
 {
@@ -81,30 +101,22 @@ static int find_interface_class_index(const struct libusb_config_descriptor *con
    return -1;
 }
 
+
+static bool conf_is_audio_class(const struct libusb_config_descriptor *conf)
+{
+   return find_interface_class_index(conf, USB_CLASS_AUDIO,
+            USB_SUBCLASS_AUDIO_STREAMING) >= 0;
+}
+
 static bool device_is_audio_class(libusb_device *dev)
 {
-   struct libusb_device_descriptor desc;
-   if (libusb_get_device_descriptor(dev, &desc) < 0)
+   struct libusb_config_descriptor *desc;
+   if (libusb_get_active_config_descriptor(dev, &desc) < 0)
       return false;
 
-   // Audio class is declared in config descriptor.
-   if (desc.bDeviceClass != 0 ||
-         desc.bDeviceSubClass != 0 ||
-         desc.bDeviceProtocol != 0)
-      return false;
-
-   struct libusb_config_descriptor *conf;
-   if (libusb_get_active_config_descriptor(dev, &conf) < 0)
-      return false;
-
-   bool is_audio = false;
-
-   if (find_interface_class_index(conf, USB_CLASS_AUDIO,
-            USB_SUBCLASS_AUDIO_STREAMING) >= 0)
-      is_audio = true;
-
-   libusb_free_config_descriptor(conf);
-   return is_audio;
+   bool ret = conf_is_audio_class(desc);
+   libusb_free_config_descriptor(desc);
+   return ret;
 }
 
 static bool fill_vid_pid(libusb_device *dev,
@@ -120,8 +132,7 @@ static bool fill_vid_pid(libusb_device *dev,
    return true;
 }
 
-static bool enumerate_audio_devices(libusb_context *ctx,
-      libusb_device **list, unsigned devices,
+static bool enumerate_audio_devices(libusb_device **list, unsigned devices,
       struct maru_audio_device **audio_list, unsigned *num_devices)
 {
    size_t audio_devices = 0;
@@ -172,7 +183,7 @@ maru_error maru_list_audio_devices(struct maru_audio_device **audio_list,
    if (devices <= 0)
       goto error;
 
-   if (!enumerate_audio_devices(ctx, list, devices, audio_list, num_devices))
+   if (!enumerate_audio_devices(list, devices, audio_list, num_devices))
       goto error;
 
    libusb_free_device_list(list, true);
@@ -298,6 +309,7 @@ static bool add_stream(maru_context *ctx, unsigned stream_ep, unsigned feedback_
 
    ctx->streams[ctx->num_streams].stream_ep = stream_ep;
    ctx->streams[ctx->num_streams].feedback_ep = feedback_ep;
+   ctx->streams[ctx->num_streams].fifo = NULL;
 
    ctx->num_streams++;
    return true;
@@ -316,9 +328,10 @@ static void deinit_stream(maru_context *ctx, maru_stream stream)
    {
       poll_list_remove(&ctx->fds,
             maru_fifo_read_notify_fd(str->fifo));
+
+      maru_fifo_free(str->fifo);
    }
 
-   maru_fifo_free(str->fifo);
    str->fifo = NULL;
    str->busy = false;
 
@@ -346,11 +359,7 @@ static bool enumerate_endpoints(maru_context *ctx, const struct libusb_config_de
 
 static bool enumerate_streams(maru_context *ctx)
 {
-   bool ret = true;
-   struct libusb_config_descriptor *conf;
-   if (libusb_get_active_config_descriptor(libusb_get_device(ctx->handle),
-            &conf) < 0)
-      return false;
+   struct libusb_config_descriptor *conf = ctx->conf;
 
    int ctrl_index = find_interface_class_index(conf,
          USB_CLASS_AUDIO, USB_SUBCLASS_AUDIO_CONTROL);
@@ -358,10 +367,7 @@ static bool enumerate_streams(maru_context *ctx)
          USB_CLASS_AUDIO, USB_SUBCLASS_AUDIO_STREAMING);
 
    if (ctrl_index < 0 || stream_index < 0)
-   {
-      ret = false;
-      goto end;
-   }
+      return false;
 
    ctx->control_interface = ctrl_index;
    ctx->stream_interface = stream_index;
@@ -374,28 +380,17 @@ static bool enumerate_streams(maru_context *ctx)
       {
          if (libusb_detach_kernel_driver(ctx->handle,
                   ifaces[i]) < 0)
-         {
-            ret = false;
-            goto end;
-         }
+            return false;
       }
 
       if (libusb_claim_interface(ctx->handle, ifaces[i]) < 0)
-      {
-         ret = false;
-         goto end;
-      }
+         return false;
    }
 
    if (!enumerate_endpoints(ctx, conf))
-   {
-      ret = false;
-      goto end;
-   }
+      return false;
 
-end:
-   libusb_free_config_descriptor(conf);
-   return ret;
+   return true;
 }
 
 maru_error maru_create_context_from_vid_pid(maru_context **ctx,
@@ -416,7 +411,13 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
    if (!context->handle)
       goto error;
 
-   if (!device_is_audio_class(libusb_get_device(context->handle)))
+   if (libusb_get_active_config_descriptor(libusb_get_device(context->handle), &context->conf) < 0)
+   {
+      context->conf = NULL;
+      goto error;
+   }
+
+   if (!conf_is_audio_class(context->conf))
       goto error;
 
    if (!enumerate_streams(context))
@@ -464,11 +465,80 @@ void maru_destroy_context(maru_context *ctx)
 
    pthread_mutex_destroy(&ctx->lock);
 
+   if (ctx->conf)
+      libusb_free_config_descriptor(ctx->conf);
+
    free(ctx);
 }
 
 int maru_get_num_streams(maru_context *ctx)
 {
    return ctx->num_streams;
+}
+
+static bool parse_audio_format(const uint8_t *data, size_t length,
+      struct maru_stream_desc *desc)
+{
+   const struct usb_uas_format_descriptor *header = NULL;
+   for (size_t i = 0; i < length; i += header->bLength)
+   {
+      header = (const struct usb_uas_format_descriptor*)&data[i];
+
+      if (header->bLength != sizeof(*header))
+         continue;
+
+      if (header->bDescriptorType != (USB_CLASS_DESCRIPTOR | USB_INTERFACE_DESCRIPTOR_TYPE) ||
+            header->bDescriptorSubtype != USB_FORMAT_DESCRIPTOR_SUBTYPE ||
+            header->bFormatType != USB_FORMAT_TYPE_I ||
+            header->bSamFreqType != USB_FREQ_TYPE_DIRECT)
+         continue;
+
+      desc->sample_rate =
+         (header->tSamFreq[0] <<  0) |
+         (header->tSamFreq[1] <<  8) |
+         (header->tSamFreq[2] << 16);
+
+      desc->channels = header->bNrChannels;
+      desc->bits = header->nBitResolution;
+      desc->sample_rate_min = desc->sample_rate_max = 0;
+      return true;
+   }
+
+   return false;
+}
+
+static bool fill_audio_format(maru_context *ctx, struct maru_stream_desc *desc)
+{
+   // Format descriptors are not standard (class specific),
+   // so we poke in the extra descriptors.
+
+   const struct libusb_interface_descriptor *iface = &ctx->conf->interface[ctx->stream_interface].altsetting[0];
+   return parse_audio_format(iface->extra, iface->extra_length, desc);
+}
+
+maru_error maru_get_stream_desc(maru_context *ctx,
+      maru_stream stream, struct maru_stream_desc **desc,
+      unsigned *num_desc)
+{
+   if (stream >= maru_get_num_streams(ctx))
+      return LIBMARU_ERROR_INVALID;
+
+   struct maru_stream_desc *audio_desc = calloc(1, sizeof(*audio_desc));
+   if (!audio_desc)
+      goto error;
+
+   // Assume for now that all streams have same audio format.
+   if (!fill_audio_format(ctx, audio_desc))
+      goto error;
+
+   *desc = audio_desc;
+   *num_desc = 1;
+   return LIBMARU_SUCCESS;
+
+error:
+   free(audio_desc);
+   *desc = NULL;
+   *num_desc = 0;
+   return LIBMARU_ERROR_GENERIC;
 }
 
