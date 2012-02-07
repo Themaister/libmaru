@@ -312,8 +312,11 @@ static void deinit_stream(maru_context *ctx, maru_stream stream)
    if (!str->busy)
       goto end;
 
-   poll_list_remove(&ctx->fds,
-         maru_fifo_read_notify_fd(str->fifo));
+   if (str->fifo)
+   {
+      poll_list_remove(&ctx->fds,
+            maru_fifo_read_notify_fd(str->fifo));
+   }
 
    maru_fifo_free(str->fifo);
    str->fifo = NULL;
@@ -426,7 +429,10 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
       goto error;
 
    if (pthread_create(&context->thread, NULL, thread_entry, context) < 0)
+   {
+      context->thread = 0;
       goto error;
+   }
 
    *ctx = context;
    return LIBMARU_SUCCESS;
@@ -444,7 +450,8 @@ void maru_destroy_context(maru_context *ctx)
    if (ctx->quit_fd[1] >= 0)
    {
       close(ctx->quit_fd[1]);
-      pthread_join(ctx->thread, NULL);
+      if (ctx->thread)
+         pthread_join(ctx->thread, NULL);
    }
    if (ctx->quit_fd[0] >= 0)
       close(ctx->quit_fd[0]);

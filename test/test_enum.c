@@ -17,5 +17,15 @@ int main(void)
             i, (unsigned)list[i].vendor_id, (unsigned)list[i].product_id);
    }
 
+   if (num_devices > 0)
+   {
+      maru_context *ctx;
+      assert(maru_create_context_from_vid_pid(&ctx, list[0].vendor_id,
+               list[0].product_id) == LIBMARU_SUCCESS);
+
+      fprintf(stderr, "Streams: %d\n", maru_get_num_streams(ctx));
+      maru_destroy_context(ctx);
+   }
+
    free(list);
 }
