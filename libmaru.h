@@ -21,12 +21,6 @@ struct maru_audio_device
 
    /** Product ID of connected device. */
    uint16_t product_id;
-
-   /** Tells if the audio interfaces of the device are claimed by the kernel.
-    * To use this device, libmaru will attempt to take control of the device.
-    * If a device is not claimed by the kernel,
-    * some other process might have taken control of it. */
-   bool claimed_by_kernel;
 };
 
 /** \ingroup lib
@@ -59,6 +53,7 @@ typedef enum
    LIBMARU_ERROR_ACCESS    = -4, /**< Lack of privileges.
                                    Often occurs if USB subsystem needs root privileges, and caller is a user. */
    LIBMARU_ERROR_INVALID   = -5, /**< Invalid argument */
+   LIBMARU_ERROR_MEMORY    = -6, /**< Memory allocation error */
    LIBMARU_ERROR_UNKNOWN   = INT_MIN /**< Unknown error (Also used to enforce int size of enum) */
 } maru_error;
 
