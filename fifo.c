@@ -499,6 +499,7 @@ maru_error maru_fifo_set_write_trigger(maru_fifo *fifo, size_t size)
       return LIBMARU_ERROR_INVALID;
 
    fifo->write_trigger = size;
+   maru_fifo_write_notification_ack(fifo);
    return LIBMARU_SUCCESS;
 }
 
@@ -511,6 +512,7 @@ maru_error maru_fifo_set_read_trigger(maru_fifo *fifo, size_t size)
       return LIBMARU_ERROR_INVALID;
 
    fifo->read_trigger = size;
+   maru_fifo_read_notification_ack(fifo);
    return LIBMARU_SUCCESS;
 }
 
