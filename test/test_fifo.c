@@ -1,4 +1,4 @@
-#include "../fifo.h"
+#include <fifo.h>
 #include <pthread.h>
 #include <assert.h>
 #include <sys/types.h>

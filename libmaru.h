@@ -10,6 +10,7 @@ extern "C" {
 #include <stdint.h>
 #include <poll.h>
 #include <limits.h>
+#include <stddef.h>
 
 /** \ingroup lib
  * A structure describing a USB audio device connected to the system.

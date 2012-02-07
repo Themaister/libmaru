@@ -1,6 +1,6 @@
 #include "libmaru.h"
 #include "fifo.h"
-#include <libusb/libusb.h>
+#include <libusb-1.0/libusb.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <pthread.h>
@@ -48,7 +48,7 @@ struct maru_context
 #define USB_SUBCLASS_AUDIO_CONTROL 1
 #define USB_SUBCLASS_AUDIO_STREAMING 2
 
-#define USB_ENDPOINT_TYPE_ISOCHRONOUS 0x01
+#define USB_ENDPOINT_ISOCHRONOUS 0x01
 #define USB_ENDPOINT_ASYNC 0x04
 
 static inline bool interface_is_class(const struct libusb_interface_descriptor *iface, unsigned class)
@@ -61,7 +61,7 @@ static inline bool interface_is_subclass(const struct libusb_interface_descripto
    return iface->bInterfaceSubClass == subclass;
 }
 
-static int find_interface_class_index(const struct libusb_config_descriptor *desc,
+static int find_interface_class_index(const struct libusb_config_descriptor *conf,
       unsigned class, unsigned subclass)
 {
    for (unsigned i = 0; i < conf->bNumInterfaces; i++)
@@ -81,7 +81,7 @@ static int find_interface_class_index(const struct libusb_config_descriptor *des
    return -1;
 }
 
-static bool device_is_audio_class(libusb_context *ctx, libusb_device *dev)
+static bool device_is_audio_class(libusb_device *dev)
 {
    struct libusb_device_descriptor desc;
    if (libusb_get_device_descriptor(dev, &desc) < 0)
@@ -103,20 +103,19 @@ static bool device_is_audio_class(libusb_context *ctx, libusb_device *dev)
             USB_SUBCLASS_AUDIO_STREAMING) >= 0)
       is_audio = true;
 
-end:
    libusb_free_config_descriptor(conf);
    return is_audio;
 }
 
 static bool fill_vid_pid(libusb_device *dev,
-      struct maru_audio_device *dev)
+      struct maru_audio_device *audio_dev)
 {
    struct libusb_device_descriptor desc;
    if (libusb_get_device_descriptor(dev, &desc) < 0)
       return false;
 
-   dev->vendor_id = desc.idVendor;
-   dev->product_id = desc.idProduct;
+   audio_dev->vendor_id = desc.idVendor;
+   audio_dev->product_id = desc.idProduct;
 
    return true;
 }
@@ -127,7 +126,7 @@ static bool enumerate_audio_devices(libusb_context *ctx,
 {
    size_t audio_devices = 0;
    size_t audio_devices_size = 0;
-   struct maru_audio_devices *audio_dev = NULL;
+   struct maru_audio_device *audio_dev = NULL;
 
    for (ssize_t i = 0; i < devices; i++)
    {
@@ -138,7 +137,7 @@ static bool enumerate_audio_devices(libusb_context *ctx,
       {
          audio_devices_size = 2 * audio_devices_size + 1;
 
-         struct maru_audio_devices *new_dev = realloc(audio_dev,
+         struct maru_audio_device *new_dev = realloc(audio_dev,
                audio_devices_size * sizeof(*new_dev));
 
          if (!new_dev)
@@ -150,7 +149,6 @@ static bool enumerate_audio_devices(libusb_context *ctx,
          audio_dev = new_dev;
       }
 
-      struct maru_audio_device dev;
       if (!fill_vid_pid(list[i], &audio_dev[audio_devices]))
          continue;
 
@@ -159,6 +157,7 @@ static bool enumerate_audio_devices(libusb_context *ctx,
 
    *audio_list = audio_dev;
    *num_devices = audio_devices;
+   return true;
 }
 
 maru_error maru_list_audio_devices(struct maru_audio_device **audio_list,
@@ -184,7 +183,7 @@ error:
       libusb_free_device_list(list, true);
 
    libusb_exit(ctx);
-   return LIBUSB_ERROR_MEMORY;
+   return LIBMARU_ERROR_MEMORY;
 }
 
 static bool poll_list_add(struct poll_list *fds, int fd, short events)
@@ -192,7 +191,7 @@ static bool poll_list_add(struct poll_list *fds, int fd, short events)
    if (fds->size >= fds->capacity)
    {
       fds->capacity = 2 * fds->capacity + 1;
-      fds->fd = realloc(fds->fd, fds->capacity * sizeof(*fd));
+      fds->fd = realloc(fds->fd, fds->capacity * sizeof(*fds->fd));
       if (!fds->fd)
          return false;
    }
@@ -231,7 +230,7 @@ static void poll_added_cb(int fd, short events, void *userdata)
 {
    maru_context *ctx = userdata;
    ctx_lock(ctx);
-   poll_list_add(&ctx.fds, fd, events);
+   poll_list_add(&ctx->fds, fd, events);
    ctx_unlock(ctx);
 }
 
@@ -239,18 +238,18 @@ static void poll_removed_cb(int fd, void *userdata)
 {
    maru_context *ctx = userdata;
    ctx_lock(ctx);
-   poll_list_remove(&ctx.fds, fd);
+   poll_list_remove(&ctx->fds, fd);
    ctx_unlock(ctx);
 }
 
 static bool poll_list_init(maru_context *ctx)
 {
    bool ret = true;
-   struct libusb_pollfd **list = libusb_get_pollfds(ctx->ctx);
+   const struct libusb_pollfd **list = libusb_get_pollfds(ctx->ctx);
    if (!list)
       return false;
 
-   struct libusb_pollfd **tmp = list;
+   const struct libusb_pollfd **tmp = list;
    while (*tmp)
    {
       const struct libusb_pollfd *fd = *tmp;
@@ -276,7 +275,7 @@ end:
    return ret;
 }
 
-static bool poll_list_deinit(maru_context *ctx)
+static void poll_list_deinit(maru_context *ctx)
 {
    libusb_set_pollfd_notifiers(ctx->ctx, NULL, NULL, NULL);
    free(ctx->fds.fd);
@@ -286,6 +285,7 @@ static bool poll_list_deinit(maru_context *ctx)
 static void *thread_entry(void *data)
 {
    maru_context *ctx = data;
+   (void)ctx;
 
    pthread_exit(NULL);
 }
@@ -313,7 +313,7 @@ static void deinit_stream(maru_context *ctx, maru_stream stream)
       goto end;
 
    poll_list_remove(&ctx->fds,
-         maru_fifo_read_notification_fd(str->fifo));
+         maru_fifo_read_notify_fd(str->fifo));
 
    maru_fifo_free(str->fifo);
    str->fifo = NULL;
@@ -323,7 +323,7 @@ end:
    ctx_unlock(ctx);
 }
 
-static bool enumerate_endpoints(maru_context *ctx, const libusb_config_descriptor *cdesc)
+static bool enumerate_endpoints(maru_context *ctx, const struct libusb_config_descriptor *cdesc)
 {
    const struct libusb_interface_descriptor *desc =
       &cdesc->interface[ctx->stream_interface].altsetting[0]; // Hardcoded for now.
@@ -344,15 +344,15 @@ static bool enumerate_endpoints(maru_context *ctx, const libusb_config_descripto
 static bool enumerate_streams(maru_context *ctx)
 {
    bool ret = true;
-   libusb_config_descriptor *conf;
+   struct libusb_config_descriptor *conf;
    if (libusb_get_active_config_descriptor(libusb_get_device(ctx->handle),
             &conf) < 0)
       return false;
 
    int ctrl_index = find_interface_class_index(conf,
-         USB_SUBCLASS_AUDIO_CONTROL);
+         USB_CLASS_AUDIO, USB_SUBCLASS_AUDIO_CONTROL);
    int stream_index = find_interface_class_index(conf,
-         USB_SUBCLASS_AUDIO_STREAMING);
+         USB_CLASS_AUDIO, USB_SUBCLASS_AUDIO_STREAMING);
 
    if (ctrl_index < 0 || stream_index < 0)
    {
@@ -384,7 +384,7 @@ static bool enumerate_streams(maru_context *ctx)
       }
    }
 
-   if (!enumerate_endpoints(ctx))
+   if (!enumerate_endpoints(ctx, conf))
    {
       ret = false;
       goto end;
@@ -409,10 +409,11 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
    if (libusb_init(&context->ctx) < 0)
       goto error;
 
-   if (libusb_open_device_with_vid_pid(context->ctx, &context->handle) < 0)
+   context->handle = libusb_open_device_with_vid_pid(context->ctx, vid, pid);
+   if (!context->handle)
       goto error;
 
-   if (!device_is_audio_class(context->ctx, libusb_get_device(context->handle)))
+   if (!device_is_audio_class(libusb_get_device(context->handle)))
       goto error;
 
    if (!enumerate_streams(context))
@@ -435,7 +436,7 @@ error:
    return LIBMARU_ERROR_GENERIC;
 }
 
-static void maru_destroy_context(maru_context *ctx)
+void maru_destroy_context(maru_context *ctx)
 {
    if (!ctx)
       return;
