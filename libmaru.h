@@ -107,14 +107,14 @@ void maru_destroy_context(maru_context *ctx);
  * \returns Available hardware streams.
  * If negative, the value represents an error code \ref maru_error.
  */
-int maru_get_available_streams(maru_context *ctx);
+int maru_get_num_streams(maru_context *ctx);
 
 /** \ingroup lib
  * \brief Checks if a stream is currently being used.
  *
  * \param ctx libmaru context
  * \param stream Stream index. Possible indices are in the range of
- * [0, \c maru_get_available_streams() - 1] inclusive.
+ * [0, \c maru_get_num_streams() - 1] inclusive.
  *
  * \returns 1 if stream can be used, 0 if it is already being used, negative if error \ref maru_error occured.
  */

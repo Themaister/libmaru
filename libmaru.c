@@ -34,7 +34,6 @@ struct maru_context
 
    struct maru_stream_internal *streams;
    unsigned num_streams;
-   unsigned audio_control_ep;
    unsigned control_interface;
    unsigned stream_interface;
    int quit_fd[2];
@@ -48,6 +47,9 @@ struct maru_context
 #define USB_CLASS_AUDIO 1
 #define USB_SUBCLASS_AUDIO_CONTROL 1
 #define USB_SUBCLASS_AUDIO_STREAMING 2
+
+#define USB_ENDPOINT_TYPE_ISOCHRONOUS 0x01
+#define USB_ENDPOINT_ASYNC 0x04
 
 static inline bool interface_is_class(const struct libusb_interface_descriptor *iface, unsigned class)
 {
@@ -288,8 +290,60 @@ static void *thread_entry(void *data)
    pthread_exit(NULL);
 }
 
+static bool add_stream(maru_context *ctx, unsigned stream_ep, unsigned feedback_ep)
+{
+   ctx->streams = realloc(ctx->streams, (ctx->num_streams + 1) * sizeof(*ctx->streams));
+   if (!ctx->streams)
+      return false;
+
+   ctx->streams[ctx->num_streams].stream_ep = stream_ep;
+   ctx->streams[ctx->num_streams].feedback_ep = feedback_ep;
+
+   ctx->num_streams++;
+   return true;
+}
+
+static void deinit_stream(maru_context *ctx, maru_stream stream)
+{
+   struct maru_stream_internal *str = &ctx->streams[stream];
+
+   ctx_lock(ctx);
+
+   if (!str->busy)
+      goto end;
+
+   poll_list_remove(&ctx->fds,
+         maru_fifo_read_notification_fd(str->fifo));
+
+   maru_fifo_free(str->fifo);
+   str->fifo = NULL;
+   str->busy = false;
+
+end:
+   ctx_unlock(ctx);
+}
+
+static bool enumerate_endpoints(maru_context *ctx, const libusb_config_descriptor *cdesc)
+{
+   const struct libusb_interface_descriptor *desc =
+      &cdesc->interface[ctx->stream_interface].altsetting[0]; // Hardcoded for now.
+
+   // Just assume everything uses async feedback.
+   for (unsigned i = 0; i < desc->bNumEndpoints; i++)
+   {
+      const struct libusb_endpoint_descriptor *endp = &desc->endpoint[i];
+
+      if (endp->bmAttributes == (USB_ENDPOINT_ISOCHRONOUS | USB_ENDPOINT_ASYNC) &&
+            !add_stream(ctx, endp->bEndpointAddress, endp->bSynchAddress))
+         return false;
+   }
+
+   return true;
+}
+
 static bool enumerate_streams(maru_context *ctx)
 {
+   bool ret = true;
    libusb_config_descriptor *conf;
    if (libusb_get_active_config_descriptor(libusb_get_device(ctx->handle),
             &conf) < 0)
@@ -301,7 +355,10 @@ static bool enumerate_streams(maru_context *ctx)
          USB_SUBCLASS_AUDIO_STREAMING);
 
    if (ctrl_index < 0 || stream_index < 0)
-      goto error;
+   {
+      ret = false;
+      goto end;
+   }
 
    ctx->control_interface = ctrl_index;
    ctx->stream_interface = stream_index;
@@ -314,18 +371,28 @@ static bool enumerate_streams(maru_context *ctx)
       {
          if (libusb_detach_kernel_driver(ctx->handle,
                   ifaces[i]) < 0)
-            goto error;
+         {
+            ret = false;
+            goto end;
+         }
       }
 
       if (libusb_claim_interface(ctx->handle, ifaces[i]) < 0)
-         goto error;
+      {
+         ret = false;
+         goto end;
+      }
    }
 
-   return true;
+   if (!enumerate_endpoints(ctx))
+   {
+      ret = false;
+      goto end;
+   }
 
-error:
+end:
    libusb_free_config_descriptor(conf);
-   return false;
+   return ret;
 }
 
 maru_error maru_create_context_from_vid_pid(maru_context **ctx,
@@ -368,26 +435,6 @@ error:
    return LIBMARU_ERROR_GENERIC;
 }
 
-static void deinit_stream(maru_context *ctx, maru_stream stream)
-{
-   struct maru_stream_internal *str = &ctx->streams[stream];
-
-   ctx_lock(ctx);
-
-   if (!str->busy)
-      goto end;
-
-   poll_list_remove(&ctx->fds,
-         maru_fifo_read_notification_fd(str->fifo));
-
-   maru_fifo_free(str->fifo);
-   str->fifo = NULL;
-   str->busy = false;
-
-end:
-   ctx_unlock(ctx);
-}
-
 static void maru_destroy_context(maru_context *ctx)
 {
    if (!ctx)
@@ -410,5 +457,10 @@ static void maru_destroy_context(maru_context *ctx)
    pthread_mutex_destroy(&ctx->lock);
 
    free(ctx);
+}
+
+int maru_get_num_streams(maru_context *ctx)
+{
+   return ctx->num_streams;
 }
 
