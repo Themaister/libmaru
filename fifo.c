@@ -454,27 +454,37 @@ size_t maru_fifo_blocking_read(maru_fifo *fifo,
    return has_read;
 }
 
-void maru_fifo_read_notify_ack(maru_fifo *fifo)
+static inline void maru_fifo_read_notify_ack_nolock(maru_fifo *fifo)
 {
-   fifo_lock(fifo);
    char dummy[1024];
    // Flush out all data.
    while (read(fifo->read_fd[0], dummy, sizeof(dummy)) > 0);
    // If there is still data to be read, poll() should give POLLIN.
    if (maru_fifo_read_avail_nolock(fifo) >= fifo->read_trigger)
       write(fifo->read_fd[1], (uint8_t[]) {0}, 1);
-   fifo_unlock(fifo);
 }
 
-void maru_fifo_write_notify_ack(maru_fifo *fifo)
+static inline void maru_fifo_write_notify_ack_nolock(maru_fifo *fifo)
 {
-   fifo_lock(fifo);
    char dummy[1024];
    // Flush out all data.
    while (read(fifo->write_fd[0], dummy, sizeof(dummy)) > 0);
    // If there is still data to write, poll() should give POLLIN.
    if (maru_fifo_write_avail_nolock(fifo) >= fifo->write_trigger)
       write(fifo->write_fd[1], (uint8_t[]) {0}, 1);
+}
+
+void maru_fifo_read_notify_ack(maru_fifo *fifo)
+{
+   fifo_lock(fifo);
+   maru_fifo_read_notify_ack_nolock(fifo);
+   fifo_unlock(fifo);
+}
+
+void maru_fifo_write_notify_ack(maru_fifo *fifo)
+{
+   fifo_lock(fifo);
+   maru_fifo_write_notify_ack_nolock(fifo);
    fifo_unlock(fifo);
 }
 
@@ -492,27 +502,45 @@ void maru_fifo_kill_notification(maru_fifo *fifo)
 
 maru_error maru_fifo_set_write_trigger(maru_fifo *fifo, size_t size)
 {
+   maru_error ret = LIBMARU_SUCCESS;
+   fifo_lock(fifo);
+
    if (size == 0)
       size = 1;
 
    if (size + fifo->read_trigger >= fifo->buffer_size)
-      return LIBMARU_ERROR_INVALID;
+   {
+      ret = LIBMARU_ERROR_INVALID;
+      goto end;
+   }
 
    fifo->write_trigger = size;
-   maru_fifo_write_notify_ack(fifo);
-   return LIBMARU_SUCCESS;
+   maru_fifo_write_notify_ack_nolock(fifo);
+
+end:
+   fifo_unlock(fifo);
+   return ret;
 }
 
 maru_error maru_fifo_set_read_trigger(maru_fifo *fifo, size_t size)
 {
+   maru_error ret = LIBMARU_SUCCESS;
+   fifo_lock(fifo);
+
    if (size == 0)
       size = 1;
 
    if (size + fifo->write_trigger >= fifo->buffer_size)
-      return LIBMARU_ERROR_INVALID;
+   {
+      ret = LIBMARU_ERROR_INVALID;
+      goto end;
+   }
 
    fifo->read_trigger = size;
-   maru_fifo_read_notify_ack(fifo);
-   return LIBMARU_SUCCESS;
+   maru_fifo_read_notify_ack_nolock(fifo);
+
+end:
+   fifo_unlock(fifo);
+   return ret;
 }
 
