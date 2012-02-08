@@ -8,6 +8,25 @@
 #include <sys/types.h>
 #include <string.h>
 #include <stdio.h>
+#include <fcntl.h>
+
+struct maru_transfer
+{
+   struct libusb_transfer *trans;
+   struct maru_fifo_locked_region region;
+
+   bool active;
+
+   size_t embedded_data_size;
+   uint8_t embedded_data[];
+};
+
+struct transfer_list
+{
+   struct maru_transfer **transfers;
+   size_t capacity;
+   size_t size;
+};
 
 struct maru_stream_internal
 {
@@ -17,11 +36,14 @@ struct maru_stream_internal
 
    uint32_t transfer_speed;
    uint32_t transfer_speed_fraction;
+   unsigned transfer_speed_mult;
 
    maru_notification_cb write_cb;
    void *write_userdata;
    maru_notification_cb error_cb;
    void *error_userdata;
+
+   struct transfer_list trans;
 };
 
 struct poll_list
@@ -42,11 +64,13 @@ struct maru_context
    unsigned control_interface;
    unsigned stream_interface;
    int quit_fd[2];
+   int notify_fd[2];
 
    struct poll_list fds;
 
    pthread_mutex_t lock;
    pthread_t thread;
+   bool thread_dead;
 };
 
 struct usb_uas_format_descriptor
@@ -283,6 +307,12 @@ static bool poll_list_init(maru_context *ctx)
       goto end;
    }
 
+   if (!poll_list_add(&ctx->fds, ctx->notify_fd[0], POLLIN | POLLHUP))
+   {
+      ret = false;
+      goto end;
+   }
+
    libusb_set_pollfd_notifiers(ctx->ctx, poll_added_cb, poll_removed_cb,
          ctx);
 
@@ -341,33 +371,64 @@ static struct maru_stream_internal *fd_to_stream(maru_context *ctx, int fd)
    return ret;
 }
 
-static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream)
+static void free_transfers_stream(maru_context *ctx,
+      struct maru_stream_internal *stream);
+
+static void enqueue_transfer(maru_context *ctx, struct maru_stream_internal *stream, const struct maru_fifo_locked_region *region)
+{
+
+}
+
+static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream, bool cancel_buffers)
 {
    maru_notification_cb cb = NULL;
    void *userdata = NULL;
+
+   if (cancel_buffers)
+   {
+      free_transfers_stream(ctx, stream);
+      return;
+   }
 
    ctx_lock(ctx);
 
    // It is possible that an open stream was suddenly closed.
    // If so, we can catch it here and ignore it.
    if (!stream->fifo)
+   {
+      free_transfers_stream(ctx, stream);
       goto end;
+   }
 
    // Handle in a dummy way.
    size_t avail = maru_fifo_read_avail(stream->fifo);
    fprintf(stderr, "%zu bytes available for reading!\n", avail);
 
-   // "Read" in a dummy way.
-   struct maru_fifo_locked_region region;
-   maru_fifo_read_lock(stream->fifo, avail,
-         &region);
-   maru_fifo_read_unlock(stream->fifo, &region);
+   // Calculate fractional speeds (async isochronous).
+   stream->transfer_speed_fraction += stream->transfer_speed & 0xffff;
 
-   if (avail && stream->write_cb)
+   size_t to_write = stream->transfer_speed_fraction >> 16;
+   to_write *= stream->transfer_speed_mult;
+
+   if (avail >= to_write)
    {
-      cb = stream->write_cb;
-      userdata = stream->write_userdata;
+      // "Read" in a dummy way.
+      struct maru_fifo_locked_region region;
+      maru_fifo_read_lock(stream->fifo, to_write,
+            &region);
+
+      enqueue_transfer(ctx, stream, &region);
+
+      if (stream->write_cb)
+      {
+         cb = stream->write_cb;
+         userdata = stream->write_userdata;
+      }
    }
+
+   // Wrap-around.
+   stream->transfer_speed_fraction = (UINT32_C(0xffff0000) & stream->transfer_speed)
+      | (stream->transfer_speed_fraction & 0xffff);
 
    maru_fifo_read_notify_ack(stream->fifo);
 
@@ -378,6 +439,52 @@ end:
    // as much as possible.
    if (cb)
       cb(userdata);
+}
+
+static void free_transfers_stream(maru_context *ctx,
+      struct maru_stream_internal *stream)
+{
+   struct transfer_list *list = &stream->trans;
+   for (unsigned trans = 0; trans < list->size; trans++)
+   {
+      struct maru_transfer *transfer = list->transfers[trans];
+
+      // We have to cancel the stream, and wait for it to complete.
+      // Cancellation is async as well.
+      if (transfer->active)
+      {
+         libusb_cancel_transfer(transfer->trans);
+         while (transfer->active)
+            libusb_handle_events(ctx->ctx);
+      }
+
+      libusb_free_transfer(transfer->trans);
+      free(transfer);
+   }
+
+   free(list->transfers);
+   memset(list, 0, sizeof(*list));
+}
+
+static void free_transfers(maru_context *ctx)
+{
+   for (unsigned str = 0; str < ctx->num_streams; str++)
+      free_transfers_stream(ctx, &ctx->streams[str]);
+}
+
+static void kill_write_notifications(maru_context *ctx)
+{
+   ctx_lock(ctx);
+
+   for (unsigned i = 0; i < ctx->num_streams; i++)
+   {
+      if (ctx->streams[i].fifo)
+         maru_fifo_kill_notification(ctx->streams[i].fifo);
+   }
+
+   // We are now officially dead, and no more streams or writes can be performed.
+   ctx->thread_dead = true;
+   ctx_unlock(ctx);
 }
 
 static void *thread_entry(void *data)
@@ -415,7 +522,7 @@ static void *thread_entry(void *data)
          if (fd_is_libusb(ctx, fds[i].fd))
             libusb_event = true;
          else if ((stream = fd_to_stream(ctx, fds[i].fd)))
-            handle_stream(ctx, stream);
+            handle_stream(ctx, stream, fds[i].revents & (POLLHUP | POLLIN | POLLNVAL));
 
          // If read pipe is closed, we should exit ASAP.
          else if (fds[i].fd == ctx->quit_fd[0])
@@ -423,15 +530,22 @@ static void *thread_entry(void *data)
             if (fds[i].revents & (POLLHUP | POLLNVAL | POLLERR))
                alive = false;
          }
+         else if (fds[i].fd == ctx->notify_fd[0])
+         {
+            char buf;
+            while (write(fds[i].fd, &buf, 1) == 1);
+         }
       }
 
       if (libusb_event && libusb_handle_events_timeout(ctx->ctx, &(struct timeval) {0}) < 0)
       {
          fprintf(stderr, "libusb_handle_events_timeout() failed!\n");
-         break;
+         alive = false;
       }
    }
 
+   free_transfers(ctx);
+   kill_write_notifications(ctx);
    return NULL;
 }
 
@@ -450,11 +564,64 @@ static bool add_stream(maru_context *ctx, unsigned stream_ep, unsigned feedback_
    return true;
 }
 
-static void deinit_stream(maru_context *ctx, maru_stream stream)
+static bool init_stream_nolock(maru_context *ctx,
+      maru_stream stream,
+      const struct maru_stream_desc *desc)
 {
    struct maru_stream_internal *str = &ctx->streams[stream];
 
-   ctx_lock(ctx);
+   size_t buffer_size = desc->buffer_size;
+   if (buffer_size == 0)
+      buffer_size = 4096;
+
+   size_t frame_size = (desc->sample_rate *
+      desc->channels *
+      desc->bits / 8) / 1000;
+
+   // Need a sufficiently large buffer to operate somewhat correctly.
+   // This works out to rougly 4ms.
+   if (buffer_size < 4 * frame_size)
+      return false;
+
+   // When POLLIN fires in thread, we want to be able
+   // to send a full frame to libusb directly from the buffer.
+   // Frame sizes might vary slighly over time (async isochronous),
+   // so be safe here and trigger on twice the nominal size.
+   size_t trigger_size = frame_size * 2;
+
+   str->fifo = maru_fifo_new(buffer_size);
+   if (!str->fifo)
+      return false;
+
+   if (maru_fifo_set_read_trigger(str->fifo,
+            trigger_size) < 0)
+   {
+      maru_fifo_free(str->fifo);
+      str->fifo = NULL;
+      return false;
+   }
+
+   poll_list_add(&ctx->fds,
+         maru_fifo_read_notify_fd(str->fifo), POLLIN | POLLHUP);
+
+   // Notify thread that we have a new file descriptor.
+   // Wakes up thread from eternal slumber.
+   write(ctx->notify_fd[1], (uint8_t[]) {0}, 1);
+
+   str->transfer_speed_mult = desc->channels * desc->bits / 8;
+
+   str->transfer_speed_fraction = desc->sample_rate / str->transfer_speed_mult;
+   str->transfer_speed_fraction <<= 16;
+   str->transfer_speed_fraction /= 1000;
+
+   str->transfer_speed = str->transfer_speed_fraction;
+
+   return true;
+}
+
+static void deinit_stream_nolock(maru_context *ctx, maru_stream stream)
+{
+   struct maru_stream_internal *str = &ctx->streams[stream];
 
    if (str->fifo)
    {
@@ -464,7 +631,12 @@ static void deinit_stream(maru_context *ctx, maru_stream stream)
       maru_fifo_free(str->fifo);
       str->fifo = NULL;
    }
+}
 
+static void deinit_stream(maru_context *ctx, maru_stream stream)
+{
+   ctx_lock(ctx);
+   deinit_stream_nolock(ctx, stream);
    ctx_unlock(ctx);
 }
 
@@ -530,7 +702,17 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
       return LIBMARU_ERROR_MEMORY;
 
    context->quit_fd[0] = context->quit_fd[1] = -1;
+   context->notify_fd[0] = context->notify_fd[1] = -1;
+
    if (pipe(context->quit_fd) < 0)
+      goto error;
+
+   if (pipe(context->notify_fd) < 0)
+      goto error;
+
+   if (fcntl(context->notify_fd[0], F_SETFL, fcntl(context->notify_fd[0], F_GETFL) | O_NONBLOCK) < 0)
+      goto error;
+   if (fcntl(context->notify_fd[1], F_SETFL, fcntl(context->notify_fd[1], F_GETFL) | O_NONBLOCK) < 0)
       goto error;
 
    if (libusb_init(&context->ctx) < 0)
@@ -585,6 +767,11 @@ void maru_destroy_context(maru_context *ctx)
    }
    if (ctx->quit_fd[0] >= 0)
       close(ctx->quit_fd[0]);
+
+   if (ctx->notify_fd[0] >= 0)
+      close(ctx->notify_fd[0]);
+   if (ctx->notify_fd[1] >= 0)
+      close(ctx->notify_fd[1]);
 
    poll_list_deinit(ctx);
 
@@ -671,14 +858,18 @@ error:
    return LIBMARU_ERROR_GENERIC;
 }
 
+static int maru_is_stream_available_nolock(maru_context *ctx,
+      maru_stream stream)
+{
+   return stream < ctx->num_streams ? 
+      !ctx->streams[stream].fifo :
+      LIBMARU_ERROR_INVALID;
+}
+
 int maru_is_stream_available(maru_context *ctx, maru_stream stream)
 {
    ctx_lock(ctx);
-
-   int ret = LIBMARU_ERROR_INVALID;
-   if (stream < ctx->num_streams)
-      ret = ctx->streams[stream].fifo ? 1 : 0;
-
+   int ret = maru_is_stream_available_nolock(ctx, stream);
    ctx_unlock(ctx);
    return ret;
 }
@@ -716,5 +907,85 @@ void maru_stream_set_error_notification(maru_context *ctx,
    ctx->streams[stream].error_cb = callback;
    ctx->streams[stream].error_userdata = userdata;
    ctx_unlock(ctx);
+}
+
+maru_error maru_stream_open(maru_context *ctx,
+      maru_stream stream,
+      const struct maru_stream_desc *desc)
+{
+   maru_error ret = LIBMARU_SUCCESS;
+   ctx_lock(ctx);
+
+   if (ctx->thread_dead)
+   {
+      ret = LIBMARU_ERROR_BUSY;
+      goto end;
+   }
+
+   if (stream >= ctx->num_streams)
+   {
+      ret = LIBMARU_ERROR_INVALID;
+      goto end;
+   }
+
+   if (maru_is_stream_available_nolock(ctx, stream) == 0)
+   {
+      ret = LIBMARU_ERROR_BUSY;
+      goto end;
+   }
+
+   if (!init_stream_nolock(ctx, stream, desc))
+   {
+      ret = LIBMARU_ERROR_GENERIC;
+      goto end;
+   }
+
+end:
+   ctx_unlock(ctx);
+   return ret;
+}
+
+maru_error maru_stream_close(maru_context *ctx,
+      maru_stream stream)
+{
+   maru_error ret = LIBMARU_SUCCESS;
+   ctx_lock(ctx);
+
+   if (maru_is_stream_available_nolock(ctx, stream) != 0)
+   {
+      ret = LIBMARU_ERROR_INVALID;
+      goto end;
+   }
+
+   deinit_stream_nolock(ctx, stream);
+
+end:
+   ctx_unlock(ctx);
+   return ret;
+}
+
+size_t maru_stream_write(maru_context *ctx, maru_stream stream,
+      const void *data, size_t size)
+{
+   if (stream >= ctx->num_streams)
+      return 0;
+
+   maru_fifo *fifo = ctx->streams[stream].fifo;
+   if (!fifo)
+      return 0;
+
+   return maru_fifo_blocking_write(fifo, data, size);
+}
+
+size_t maru_stream_write_avail(maru_context *ctx, maru_stream stream)
+{
+   if (stream >= ctx->num_streams)
+      return 0;
+
+   maru_fifo *fifo = ctx->streams[stream].fifo;
+   if (!fifo)
+      return 0;
+
+   return maru_fifo_write_avail(fifo);
 }
 

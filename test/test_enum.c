@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 int main(void)
 {
@@ -25,15 +26,36 @@ int main(void)
 
       fprintf(stderr, "Streams: %d\n", maru_get_num_streams(ctx));
 
+      int stream = maru_find_available_stream(ctx);
+      assert(stream >= 0);
+
       unsigned num_desc;
       struct maru_stream_desc *desc;
-      assert(maru_get_stream_desc(ctx, 0, &desc, &num_desc) == LIBMARU_SUCCESS);
+      assert(maru_get_stream_desc(ctx, stream, &desc, &num_desc) == LIBMARU_SUCCESS);
 
       fprintf(stderr, "Format:\n");
       fprintf(stderr, "\tRate: %u\n", desc[0].sample_rate);
       fprintf(stderr, "\tChannels: %u\n", desc[0].channels);
       fprintf(stderr, "\tBits: %u\n", desc[0].bits);
 
+      assert(maru_stream_open(ctx, stream, desc) == LIBMARU_SUCCESS);
+
+      size_t total_written = 0;
+      for (;;)
+      {
+         char buf[256];
+         ssize_t ret = read(0, buf, sizeof(buf));
+         if (ret <= 0)
+            break;
+
+         if (maru_stream_write(ctx, stream, buf, ret) < ret)
+            break;
+
+         total_written += ret;
+         fprintf(stderr, "Written: %zu bytes\n", total_written);
+      }
+
+      assert(maru_stream_close(ctx, stream) == LIBMARU_SUCCESS);
       free(desc);
       maru_destroy_context(ctx);
    }
