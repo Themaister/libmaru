@@ -124,6 +124,16 @@ int maru_is_stream_available(maru_context *ctx, maru_stream stream);
 /** \ingroup lib
  * \brief Finds first available stream.
  *
+ * This function will look through available streams
+ * and attempt to find the first vacant stream.
+ * Even if this function finds a stream,
+ * a different thread could potentially claim
+ * the stream in question before the thread
+ * calling maru_find_available_stream()
+ * can actually claim it. If this is a likely scenario,
+ * maru_find_available_stream() should be called again,
+ * until a stream is successfully created or fails.
+ *
  * \param ctx libmaru context
  * \returns Available stream is returned. If error, error code \ref maru_error is returned.
  */
@@ -200,7 +210,7 @@ maru_error maru_stream_close(maru_context *ctx, maru_stream stream);
 /** \ingroup stream
  * \brief Callback type that can be used to signal the caller when something of interest to the caller has occured.
  *
- * The notification callbacks are usually called from a different thread, and normal thread safety considerations apply. Calling libmaru functions from within this callback is unspecified.
+ * The notification callbacks are usually called from a different thread, and normal thread safety considerations apply. Calling libmaru functions from within this callback is unspecified, and is likely to deadlock.
  */
 typedef void (*maru_notification_cb)(void *userdata);
 
