@@ -13,11 +13,12 @@
 struct maru_transfer
 {
    struct libusb_transfer *trans;
+   struct maru_stream_internal *stream;
    struct maru_fifo_locked_region region;
 
    bool active;
 
-   size_t embedded_data_size;
+   size_t embedded_data_capacity;
    uint8_t embedded_data[];
 };
 
@@ -98,6 +99,8 @@ struct usb_uas_format_descriptor
 #define USB_FORMAT_DESCRIPTOR_SUBTYPE  0x02
 #define USB_FORMAT_TYPE_I              0x01
 #define USB_FREQ_TYPE_DIRECT           0x01
+
+#define USB_AUDIO_FEEDBACK_SIZE        3
 
 static inline bool interface_is_class(const struct libusb_interface_descriptor *iface, unsigned class)
 {
@@ -374,16 +377,215 @@ static struct maru_stream_internal *fd_to_stream(maru_context *ctx, int fd)
 static void free_transfers_stream(maru_context *ctx,
       struct maru_stream_internal *stream);
 
-static void enqueue_transfer(maru_context *ctx, struct maru_stream_internal *stream, const struct maru_fifo_locked_region *region)
+static struct maru_transfer *find_vacant_transfer(struct maru_transfer **transfers,
+      size_t length, size_t required_buffer)
 {
+   for (size_t i = 0; i < length; i++)
+   {
+      if (!transfers[i]->active && transfers[i]->embedded_data_capacity >= required_buffer)
+         return transfers[i];
+   }
 
+   return NULL;
+}
+
+static bool append_transfer(struct transfer_list *list, struct maru_transfer *trans)
+{
+   if (list->size >= list->capacity)
+   {
+      size_t new_capacity = list->capacity * 2 + 1;
+      struct maru_transfer **new_trans = realloc(list->transfers, new_capacity * sizeof(trans));
+      if (!new_trans)
+         return false;
+
+      list->capacity = new_capacity;
+      list->transfers = new_trans;
+   }
+
+   list->transfers[list->size++] = trans;
+   return true;
+}
+
+static struct maru_transfer *create_transfer(struct transfer_list *list, size_t required_buffer)
+{
+   struct maru_transfer *trans = calloc(1, sizeof(*trans) + required_buffer);
+   if (!trans)
+      return NULL;
+
+   trans->embedded_data_capacity = required_buffer;
+   trans->trans = libusb_alloc_transfer(1);
+   if (!trans->trans)
+      goto error;
+
+   if (!append_transfer(list, trans))
+      goto error;
+
+   return trans;
+
+error:
+   free(trans);
+   return NULL;
+}
+
+static void transfer_stream_cb(struct libusb_transfer *trans)
+{
+   if (trans->status == LIBUSB_TRANSFER_CANCELLED)
+      return;
+
+   struct maru_transfer *transfer = trans->user_data;
+
+   if (maru_fifo_read_unlock(transfer->stream->fifo, &transfer->region) != LIBMARU_SUCCESS)
+      fprintf(stderr, "Stream callback: Failed to unlock fifo!\n");
+
+   transfer->active = false;
+
+   if (trans->status != LIBUSB_TRANSFER_COMPLETED)
+      fprintf(stderr, "Stream callback: Failed transfer ...\n");
+}
+
+static void transfer_feedback_cb(struct libusb_transfer *trans)
+{
+   if (trans->status == LIBUSB_TRANSFER_COMPLETED && trans->actual_length == USB_AUDIO_FEEDBACK_SIZE)
+   {
+      struct maru_transfer *transfer = trans->user_data;
+
+      // TODO: Verify how this really works. Seems like voodoo magic at first glance.
+      uint32_t fraction = 
+         (trans->buffer[0] << 16) |
+         (trans->buffer[1] <<  8) |
+         (trans->buffer[2] <<  0);
+
+      fraction >>= 2;
+
+      transfer->stream->transfer_speed_fraction =
+         transfer->stream->transfer_speed = fraction;
+      //////////
+   }
+
+   if (libusb_submit_transfer(trans) < 0)
+      fprintf(stderr, "Resubmitting feedback transfer failed ...\n");
+}
+
+static void fill_transfer(maru_context *ctx,
+      struct maru_transfer *trans, const struct maru_fifo_locked_region *region)
+{
+   libusb_fill_iso_transfer(trans->trans,
+         ctx->handle,
+         trans->stream->stream_ep,
+
+         // If we're contigous in ring buffer, we can just read directly from it.
+         region->second ? trans->embedded_data : region->first,
+
+         region->first_size + region->second_size,
+         1,
+         transfer_stream_cb,
+         trans,
+         1000);
+
+   libusb_set_iso_packet_lengths(trans->trans, region->first_size + region->second_size);
+
+   if (region->second)
+   {
+      memcpy(trans->embedded_data, region->first, region->first_size);
+      memcpy(trans->embedded_data + region->first_size, region->second, region->second_size);
+   }
+
+   trans->region = *region;
+}
+
+static bool enqueue_transfer(maru_context *ctx, struct maru_stream_internal *stream,
+      const struct maru_fifo_locked_region *region)
+{
+   // If our region is split, we have to make a copy to get a contigous transfer.
+   size_t required_buffer = region->second_size ? region->first_size + region->second_size : 0;
+
+   // If we can reap old, used transfers, we'll reuse them as-is, no need to reallocate
+   // transfers all the time. Eventually, given a fixed sized fifo buffer,
+   // no new transfer will have to be
+   // allocated, as there is always a vacant one.
+   struct maru_transfer *transfer = find_vacant_transfer(stream->trans.transfers,
+         stream->trans.size, required_buffer);
+
+   if (!transfer)
+      transfer = create_transfer(&stream->trans, required_buffer);
+
+   if (!transfer)
+      return NULL;
+
+   transfer->stream = stream;
+   transfer->active = true;
+   fill_transfer(ctx, transfer, region);
+
+   if (libusb_submit_transfer(transfer->trans) < 0)
+   {
+      transfer->active = false;
+      return false;
+   }
+
+   return true;
+}
+
+static bool enqueue_feedback_transfer(maru_context *ctx, struct maru_stream_internal *stream)
+{
+   struct maru_transfer *trans = calloc(1, sizeof(*trans) + USB_AUDIO_FEEDBACK_SIZE);
+   if (!trans)
+      return NULL;
+
+   trans->embedded_data_capacity = USB_AUDIO_FEEDBACK_SIZE;
+
+   trans->trans = libusb_alloc_transfer(1);
+   if (!trans->trans)
+      goto error;
+
+   libusb_fill_iso_transfer(trans->trans,
+         ctx->handle,
+         stream->feedback_ep,
+         trans->embedded_data,
+         USB_AUDIO_FEEDBACK_SIZE,
+         1, transfer_feedback_cb, trans, 1000);
+
+   libusb_set_iso_packet_lengths(trans->trans, USB_AUDIO_FEEDBACK_SIZE);
+
+   trans->stream = stream;
+   trans->active = true;
+
+   if (!append_transfer(&stream->trans, trans))
+      goto error;
+
+   if (libusb_submit_transfer(trans->trans) < 0)
+   {
+      trans->active = false;
+      return false;
+   }
+
+   return true;
+
+error:
+   if (trans)
+   {
+      libusb_free_transfer(trans->trans);
+      free(trans);
+   }
+   return false;
+}
+
+static size_t stream_chunk_size(struct maru_stream_internal *stream)
+{
+   // Calculate fractional speeds (async isochronous).
+   stream->transfer_speed_fraction += stream->transfer_speed & 0xffff;
+
+   size_t to_write = stream->transfer_speed_fraction >> 16;
+   to_write *= stream->transfer_speed_mult;
+
+   // Wrap-around.
+   stream->transfer_speed_fraction = (UINT32_C(0xffff0000) & stream->transfer_speed)
+      | (stream->transfer_speed_fraction & 0xffff);
+
+   return to_write;
 }
 
 static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream, bool cancel_buffers)
 {
-   maru_notification_cb cb = NULL;
-   void *userdata = NULL;
-
    if (cancel_buffers)
    {
       free_transfers_stream(ctx, stream);
@@ -404,11 +606,7 @@ static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream
    size_t avail = maru_fifo_read_avail(stream->fifo);
    fprintf(stderr, "%zu bytes available for reading!\n", avail);
 
-   // Calculate fractional speeds (async isochronous).
-   stream->transfer_speed_fraction += stream->transfer_speed & 0xffff;
-
-   size_t to_write = stream->transfer_speed_fraction >> 16;
-   to_write *= stream->transfer_speed_mult;
+   size_t to_write = stream_chunk_size(stream);
 
    if (avail >= to_write)
    {
@@ -417,28 +615,14 @@ static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream
       maru_fifo_read_lock(stream->fifo, to_write,
             &region);
 
-      enqueue_transfer(ctx, stream, &region);
-
-      if (stream->write_cb)
-      {
-         cb = stream->write_cb;
-         userdata = stream->write_userdata;
-      }
+      if (!enqueue_transfer(ctx, stream, &region))
+         fprintf(stderr, "Enqueue transfer failed!\n");
    }
-
-   // Wrap-around.
-   stream->transfer_speed_fraction = (UINT32_C(0xffff0000) & stream->transfer_speed)
-      | (stream->transfer_speed_fraction & 0xffff);
 
    maru_fifo_read_notify_ack(stream->fifo);
 
 end:
    ctx_unlock(ctx);
-
-   // Call callback without lock applied to attempt to avoid weird deadlocks
-   // as much as possible.
-   if (cb)
-      cb(userdata);
 }
 
 static void free_transfers_stream(maru_context *ctx,
@@ -570,6 +754,9 @@ static bool init_stream_nolock(maru_context *ctx,
 {
    struct maru_stream_internal *str = &ctx->streams[stream];
 
+   if (!enqueue_feedback_transfer(ctx, str))
+      return false;
+
    size_t buffer_size = desc->buffer_size;
    if (buffer_size == 0)
       buffer_size = 4096;
@@ -615,7 +802,7 @@ static bool init_stream_nolock(maru_context *ctx,
    str->transfer_speed_fraction /= 1000;
 
    str->transfer_speed = str->transfer_speed_fraction;
-
+   
    return true;
 }
 
