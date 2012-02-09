@@ -817,7 +817,8 @@ static bool init_stream_nolock(maru_context *ctx,
 
    // Notify thread that we have a new file descriptor.
    // Wakes up thread from eternal slumber.
-   write(ctx->notify_fd[1], (uint8_t[]) {0}, 1);
+   if (write(ctx->notify_fd[1], (uint8_t[]) {0}, 1) != 1)
+      fprintf(stderr, "Failed to notify thread ...\n");
 
    str->transfer_speed_mult = desc->channels * desc->bits / 8;
 
