@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/eventfd.h>
+#include <sys/epoll.h>
 
 struct maru_transfer
 {
@@ -50,13 +51,6 @@ struct maru_stream_internal
    struct transfer_list trans;
 };
 
-struct poll_list
-{
-   struct pollfd *fd;
-   size_t capacity;
-   size_t size;
-};
-
 struct maru_context
 {
    libusb_context *ctx;
@@ -70,7 +64,7 @@ struct maru_context
    int quit_fd;
    int notify_fd;
 
-   struct poll_list fds;
+   int epfd;
 
    pthread_mutex_t lock;
    pthread_t thread;
@@ -231,34 +225,23 @@ error:
    return LIBMARU_ERROR_MEMORY;
 }
 
-static bool poll_list_add(struct poll_list *fds, int fd, short events)
+static bool poll_list_add(int epfd, int fd, short events)
 {
-   if (fds->size >= fds->capacity)
-   {
-      fds->capacity = 2 * fds->capacity + 1;
-      fds->fd = realloc(fds->fd, fds->capacity * sizeof(*fds->fd));
-      if (!fds->fd)
-         return false;
-   }
+   struct epoll_event event = {
+      .events =
+         (events & POLLIN ? EPOLLIN : 0) |
+         (events & POLLOUT ? EPOLLOUT : 0),
+      .data = {
+         .fd = fd,
+      },
+   };
 
-   fds->fd[fds->size++] = (struct pollfd) { .fd = fd, .events = events };
-   return true;
+   return epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event) == 0;
 }
 
-static bool poll_list_remove(struct poll_list *fds, int fd)
+static bool poll_list_remove(int epfd, int fd)
 {
-   for (size_t i = 0; i < fds->size; i++)
-   {
-      if (fds->fd[i].fd == fd)
-      {
-         memmove(&fds->fd[i], &fds->fd[i + 1],
-               (fds->size - (i + 1)) * sizeof(struct pollfd));
-         fds->size--;
-         return true;
-      }
-   }
-
-   return false;
+   return epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL) == 0;
 }
 
 static inline void ctx_lock(maru_context *ctx)
@@ -275,7 +258,7 @@ static void poll_added_cb(int fd, short events, void *userdata)
 {
    maru_context *ctx = userdata;
    ctx_lock(ctx);
-   poll_list_add(&ctx->fds, fd, events);
+   poll_list_add(ctx->epfd, fd, events);
    ctx_unlock(ctx);
 }
 
@@ -283,13 +266,14 @@ static void poll_removed_cb(int fd, void *userdata)
 {
    maru_context *ctx = userdata;
    ctx_lock(ctx);
-   poll_list_remove(&ctx->fds, fd);
+   poll_list_remove(ctx->epfd, fd);
    ctx_unlock(ctx);
 }
 
 static bool poll_list_init(maru_context *ctx)
 {
    bool ret = true;
+
    const struct libusb_pollfd **list = libusb_get_pollfds(ctx->ctx);
    if (!list)
       return false;
@@ -298,7 +282,7 @@ static bool poll_list_init(maru_context *ctx)
    while (*tmp)
    {
       const struct libusb_pollfd *fd = *tmp;
-      if (!poll_list_add(&ctx->fds, fd->fd, fd->events))
+      if (!poll_list_add(ctx->epfd, fd->fd, fd->events))
       {
          ret = false;
          goto end;
@@ -307,13 +291,7 @@ static bool poll_list_init(maru_context *ctx)
    }
 
    // POLLHUP is ignored by poll() in events, but this will simplify our code.
-   if (!poll_list_add(&ctx->fds, ctx->quit_fd, POLLIN | POLLHUP | POLLNVAL))
-   {
-      ret = false;
-      goto end;
-   }
-
-   if (!poll_list_add(&ctx->fds, ctx->notify_fd, POLLIN | POLLHUP | POLLNVAL))
+   if (!poll_list_add(ctx->epfd, ctx->quit_fd, POLLIN))
    {
       ret = false;
       goto end;
@@ -330,8 +308,12 @@ end:
 static void poll_list_deinit(maru_context *ctx)
 {
    libusb_set_pollfd_notifiers(ctx->ctx, NULL, NULL, NULL);
-   free(ctx->fds.fd);
-   memset(&ctx->fds, 0, sizeof(ctx->fds));
+
+   if (ctx->epfd >= 0)
+   {
+      close(ctx->epfd);
+      ctx->epfd = -1;
+   }
 }
 
 static struct maru_stream_internal *fd_to_stream(maru_context *ctx, int fd)
@@ -670,52 +652,33 @@ static void *thread_entry(void *data)
    bool alive = true;
    while (alive)
    {
-      // We need to make a copy as the polling list can be changed
-      // mid-poll, possibly causing very awkward behavior.
-      // We cannot hold the lock while we're polling as it
-      // could easily cause a deadlock.
-      ctx_lock(ctx);
-      size_t list_size = ctx->fds.size;
-      struct pollfd fds[list_size];
-      memcpy(fds, ctx->fds.fd, sizeof(fds));
-      ctx_unlock(ctx);
+      struct epoll_event events[16];
+      int num_events;
 
 poll_retry:
-      if (poll(fds, list_size, -1) < 0)
+      if ((num_events = epoll_wait(ctx->epfd, events, 16, -1)) < 0)
       {
          if (errno == EINTR)
             goto poll_retry;
 
-         fprintf(stderr, "poll() failed, hide yo kids, hide yo wife!\n");
-         perror("poll");
+         perror("epoll_wait");
          break;
       }
 
       bool libusb_event = false;
 
-      for (size_t i = 0; i < list_size; i++)
+      for (size_t i = 0; i < num_events; i++)
       {
-         if (!(fds[i].events & fds[i].revents))
-            continue;
-
+         int fd = events[i].data.fd;
          struct maru_stream_internal *stream = NULL;
 
-         if ((stream = fd_to_stream(ctx, fds[i].fd)))
+         if ((stream = fd_to_stream(ctx, fd)))
          {
             handle_stream(ctx, stream,
-                  fds[i].revents & (POLLHUP | POLLERR | POLLNVAL));
+                  events[i].events & (EPOLLHUP | EPOLLERR));
          }
-         // If read pipe is closed, we should exit ASAP.
-         else if (fds[i].fd == ctx->quit_fd)
-         {
-            if (fds[i].revents & (POLLHUP | POLLERR | POLLNVAL))
-               alive = false;
-         }
-         else if (fds[i].fd == ctx->notify_fd)
-         {
-            uint64_t val;
-            read(fds[i].fd, &val, sizeof(val));
-         }
+         else if (fd == ctx->quit_fd)
+            alive = false;
          else
             libusb_event = true;
       }
@@ -788,13 +751,8 @@ static bool init_stream_nolock(maru_context *ctx,
       return false;
    }
 
-   poll_list_add(&ctx->fds,
-         maru_fifo_read_notify_fd(str->fifo), POLLIN | POLLHUP | POLLNVAL);
-
-   // Notify thread that we have a new file descriptor.
-   // Wakes up thread from eternal slumber.
-   if (write(ctx->notify_fd, (uint64_t[]) {1}, sizeof(uint64_t)) != (ssize_t)sizeof(uint64_t))
-      fprintf(stderr, "Failed to notify thread ...\n");
+   poll_list_add(ctx->epfd,
+         maru_fifo_read_notify_fd(str->fifo), POLLIN);
 
    str->transfer_speed_mult = desc->channels * desc->bits / 8;
 
@@ -813,7 +771,7 @@ static void deinit_stream_nolock(maru_context *ctx, maru_stream stream)
 
    if (str->fifo)
    {
-      poll_list_remove(&ctx->fds,
+      poll_list_remove(ctx->epfd,
             maru_fifo_read_notify_fd(str->fifo));
 
       maru_fifo_free(str->fifo);
@@ -889,10 +847,12 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
    if (!context)
       return LIBMARU_ERROR_MEMORY;
 
-   context->quit_fd = context->notify_fd = -1;
-
    context->quit_fd = eventfd(0, 0);
-   context->notify_fd = eventfd(0, 0);
+   context->epfd = epoll_create(16);
+
+   if (context->quit_fd < 0 ||
+         context->epfd < 0)
+      goto error;
 
    if (libusb_init(&context->ctx) < 0)
       goto error;
@@ -940,13 +900,11 @@ void maru_destroy_context(maru_context *ctx)
 
    if (ctx->quit_fd >= 0)
    {
-      close(ctx->quit_fd);
+      write(ctx->quit_fd, (uint64_t[]) {1}, sizeof(uint64_t));
       if (ctx->thread)
          pthread_join(ctx->thread, NULL);
+      close(ctx->quit_fd);
    }
-
-   if (ctx->notify_fd >= 0)
-      close(ctx->notify_fd);
 
    poll_list_deinit(ctx);
 
