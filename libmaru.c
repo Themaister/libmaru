@@ -337,7 +337,7 @@ static bool fd_is_libusb(maru_context *ctx, int fd)
    bool ret = true;
    ctx_lock(ctx);
 
-   if (fd == ctx->quit_fd[0])
+   if (fd == ctx->quit_fd[0] || fd == ctx->notify_fd[0])
       ret = false;
    else
    {
@@ -729,7 +729,7 @@ static void *thread_entry(void *data)
          else if (fds[i].fd == ctx->notify_fd[0])
          {
             char buf;
-            while (write(fds[i].fd, &buf, 1) == 1);
+            while (read(fds[i].fd, &buf, 1) == 1);
          }
       }
 
