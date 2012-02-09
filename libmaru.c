@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <fcntl.h>
+#include <errno.h>
 
 struct maru_transfer
 {
@@ -697,9 +698,14 @@ static void *thread_entry(void *data)
       memcpy(fds, ctx->fds.fd, sizeof(fds));
       ctx_unlock(ctx);
 
+poll_retry:
       if (poll(fds, list_size, -1) < 0)
       {
+         if (errno == EINTR)
+            goto poll_retry;
+
          fprintf(stderr, "poll() failed, hide yo kids, hide yo wife!\n");
+         perror("poll");
          break;
       }
 
