@@ -40,7 +40,6 @@ int main(void)
 
       assert(maru_stream_open(ctx, stream, desc) == LIBMARU_SUCCESS);
 
-      size_t total_written = 0;
       for (;;)
       {
          char buf[256];
@@ -50,9 +49,6 @@ int main(void)
 
          if (maru_stream_write(ctx, stream, buf, ret) < ret)
             break;
-
-         total_written += ret;
-         fprintf(stderr, "Written: %zu bytes\n", total_written);
       }
 
       assert(maru_stream_close(ctx, stream) == LIBMARU_SUCCESS);

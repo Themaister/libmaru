@@ -17,6 +17,7 @@ struct maru_transfer
    struct maru_fifo_locked_region region;
 
    bool active;
+   bool block;
 
    size_t embedded_data_capacity;
    uint8_t embedded_data[];
@@ -429,15 +430,14 @@ error:
 
 static void transfer_stream_cb(struct libusb_transfer *trans)
 {
+   struct maru_transfer *transfer = trans->user_data;
+   transfer->active = false;
+
    if (trans->status == LIBUSB_TRANSFER_CANCELLED)
       return;
 
-   struct maru_transfer *transfer = trans->user_data;
-
-   if (maru_fifo_read_unlock(transfer->stream->fifo, &transfer->region) != LIBMARU_SUCCESS)
+   if (transfer->stream->fifo && maru_fifo_read_unlock(transfer->stream->fifo, &transfer->region) != LIBMARU_SUCCESS)
       fprintf(stderr, "Stream callback: Failed to unlock fifo!\n");
-
-   transfer->active = false;
 
    if (trans->status != LIBUSB_TRANSFER_COMPLETED)
       fprintf(stderr, "Stream callback: Failed transfer ...\n");
@@ -445,10 +445,21 @@ static void transfer_stream_cb(struct libusb_transfer *trans)
 
 static void transfer_feedback_cb(struct libusb_transfer *trans)
 {
-   if (trans->status == LIBUSB_TRANSFER_COMPLETED && trans->actual_length == USB_AUDIO_FEEDBACK_SIZE)
-   {
-      struct maru_transfer *transfer = trans->user_data;
+   struct maru_transfer *transfer = trans->user_data;
 
+   if (trans->status == LIBUSB_TRANSFER_CANCELLED)
+      transfer->active = false;
+   else if (transfer->block)
+   {
+      transfer->active = false;
+      transfer->block = false;
+   }
+
+   if (!transfer->active)
+      return;
+
+   if (trans->status == LIBUSB_TRANSFER_COMPLETED)
+   {
       // TODO: Verify how this really works. Seems like voodoo magic at first glance.
       uint32_t fraction = 
          (trans->buffer[0] << 16) |
@@ -602,15 +613,11 @@ static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream
       goto end;
    }
 
-   // Handle in a dummy way.
    size_t avail = maru_fifo_read_avail(stream->fifo);
-   fprintf(stderr, "%zu bytes available for reading!\n", avail);
-
    size_t to_write = stream_chunk_size(stream);
 
    if (avail >= to_write)
    {
-      // "Read" in a dummy way.
       struct maru_fifo_locked_region region;
       maru_fifo_read_lock(stream->fifo, to_write,
             &region);
@@ -629,6 +636,7 @@ static void free_transfers_stream(maru_context *ctx,
       struct maru_stream_internal *stream)
 {
    struct transfer_list *list = &stream->trans;
+
    for (unsigned trans = 0; trans < list->size; trans++)
    {
       struct maru_transfer *transfer = list->transfers[trans];
@@ -637,6 +645,7 @@ static void free_transfers_stream(maru_context *ctx,
       // Cancellation is async as well.
       if (transfer->active)
       {
+         transfer->block = true;
          libusb_cancel_transfer(transfer->trans);
          while (transfer->active)
             libusb_handle_events(ctx->ctx);
@@ -706,7 +715,10 @@ static void *thread_entry(void *data)
          if (fd_is_libusb(ctx, fds[i].fd))
             libusb_event = true;
          else if ((stream = fd_to_stream(ctx, fds[i].fd)))
-            handle_stream(ctx, stream, fds[i].revents & (POLLHUP | POLLIN | POLLNVAL));
+         {
+            handle_stream(ctx, stream,
+                  fds[i].revents & (POLLHUP | POLLERR | POLLNVAL));
+         }
 
          // If read pipe is closed, we should exit ASAP.
          else if (fds[i].fd == ctx->quit_fd[0])
@@ -721,7 +733,8 @@ static void *thread_entry(void *data)
          }
       }
 
-      if (libusb_event && libusb_handle_events_timeout(ctx->ctx, &(struct timeval) {0}) < 0)
+      if (libusb_event &&
+            libusb_handle_events_timeout(ctx->ctx, &(struct timeval) {0}) < 0)
       {
          fprintf(stderr, "libusb_handle_events_timeout() failed!\n");
          alive = false;
@@ -797,7 +810,7 @@ static bool init_stream_nolock(maru_context *ctx,
 
    str->transfer_speed_mult = desc->channels * desc->bits / 8;
 
-   str->transfer_speed_fraction = desc->sample_rate / str->transfer_speed_mult;
+   str->transfer_speed_fraction = desc->sample_rate;
    str->transfer_speed_fraction <<= 16;
    str->transfer_speed_fraction /= 1000;
 
