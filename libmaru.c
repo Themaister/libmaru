@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/eventfd.h>
 
 struct maru_transfer
 {
@@ -66,8 +67,8 @@ struct maru_context
    unsigned num_streams;
    unsigned control_interface;
    unsigned stream_interface;
-   int quit_fd[2];
-   int notify_fd[2];
+   int quit_fd;
+   int notify_fd;
 
    struct poll_list fds;
 
@@ -306,13 +307,13 @@ static bool poll_list_init(maru_context *ctx)
    }
 
    // POLLHUP is ignored by poll() in events, but this will simplify our code.
-   if (!poll_list_add(&ctx->fds, ctx->quit_fd[0], POLLIN | POLLHUP))
+   if (!poll_list_add(&ctx->fds, ctx->quit_fd, POLLIN | POLLHUP | POLLNVAL))
    {
       ret = false;
       goto end;
    }
 
-   if (!poll_list_add(&ctx->fds, ctx->notify_fd[0], POLLIN | POLLHUP))
+   if (!poll_list_add(&ctx->fds, ctx->notify_fd, POLLIN | POLLHUP | POLLNVAL))
    {
       ret = false;
       goto end;
@@ -331,30 +332,6 @@ static void poll_list_deinit(maru_context *ctx)
    libusb_set_pollfd_notifiers(ctx->ctx, NULL, NULL, NULL);
    free(ctx->fds.fd);
    memset(&ctx->fds, 0, sizeof(ctx->fds));
-}
-
-static bool fd_is_libusb(maru_context *ctx, int fd)
-{
-   bool ret = true;
-   ctx_lock(ctx);
-
-   if (fd == ctx->quit_fd[0] || fd == ctx->notify_fd[0])
-      ret = false;
-   else
-   {
-      for (unsigned i = 0; i < ctx->num_streams; i++)
-      {
-         if (ctx->streams[i].fifo &&
-               fd == maru_fifo_read_notify_fd(ctx->streams[i].fifo))
-         {
-            ret = false;
-            break;
-         }
-      }
-   }
-
-   ctx_unlock(ctx);
-   return ret;
 }
 
 static struct maru_stream_internal *fd_to_stream(maru_context *ctx, int fd)
@@ -723,25 +700,24 @@ poll_retry:
 
          struct maru_stream_internal *stream = NULL;
 
-         if (fd_is_libusb(ctx, fds[i].fd))
-            libusb_event = true;
-         else if ((stream = fd_to_stream(ctx, fds[i].fd)))
+         if ((stream = fd_to_stream(ctx, fds[i].fd)))
          {
             handle_stream(ctx, stream,
                   fds[i].revents & (POLLHUP | POLLERR | POLLNVAL));
          }
-
          // If read pipe is closed, we should exit ASAP.
-         else if (fds[i].fd == ctx->quit_fd[0])
+         else if (fds[i].fd == ctx->quit_fd)
          {
-            if (fds[i].revents & (POLLHUP | POLLNVAL | POLLERR))
+            if (fds[i].revents & (POLLHUP | POLLERR | POLLNVAL))
                alive = false;
          }
-         else if (fds[i].fd == ctx->notify_fd[0])
+         else if (fds[i].fd == ctx->notify_fd)
          {
-            char buf;
-            while (read(fds[i].fd, &buf, 1) == 1);
+            uint64_t val;
+            read(fds[i].fd, &val, sizeof(val));
          }
+         else
+            libusb_event = true;
       }
 
       if (libusb_event &&
@@ -817,7 +793,7 @@ static bool init_stream_nolock(maru_context *ctx,
 
    // Notify thread that we have a new file descriptor.
    // Wakes up thread from eternal slumber.
-   if (write(ctx->notify_fd[1], (uint8_t[]) {0}, 1) != 1)
+   if (write(ctx->notify_fd, (uint64_t[]) {1}, sizeof(uint64_t)) != (ssize_t)sizeof(uint64_t))
       fprintf(stderr, "Failed to notify thread ...\n");
 
    str->transfer_speed_mult = desc->channels * desc->bits / 8;
@@ -913,19 +889,10 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
    if (!context)
       return LIBMARU_ERROR_MEMORY;
 
-   context->quit_fd[0] = context->quit_fd[1] = -1;
-   context->notify_fd[0] = context->notify_fd[1] = -1;
+   context->quit_fd = context->notify_fd = -1;
 
-   if (pipe(context->quit_fd) < 0)
-      goto error;
-
-   if (pipe(context->notify_fd) < 0)
-      goto error;
-
-   if (fcntl(context->notify_fd[0], F_SETFL, fcntl(context->notify_fd[0], F_GETFL) | O_NONBLOCK) < 0)
-      goto error;
-   if (fcntl(context->notify_fd[1], F_SETFL, fcntl(context->notify_fd[1], F_GETFL) | O_NONBLOCK) < 0)
-      goto error;
+   context->quit_fd = eventfd(0, 0);
+   context->notify_fd = eventfd(0, 0);
 
    if (libusb_init(&context->ctx) < 0)
       goto error;
@@ -971,19 +938,15 @@ void maru_destroy_context(maru_context *ctx)
    if (!ctx)
       return;
 
-   if (ctx->quit_fd[1] >= 0)
+   if (ctx->quit_fd >= 0)
    {
-      close(ctx->quit_fd[1]);
+      close(ctx->quit_fd);
       if (ctx->thread)
          pthread_join(ctx->thread, NULL);
    }
-   if (ctx->quit_fd[0] >= 0)
-      close(ctx->quit_fd[0]);
 
-   if (ctx->notify_fd[0] >= 0)
-      close(ctx->notify_fd[0]);
-   if (ctx->notify_fd[1] >= 0)
-      close(ctx->notify_fd[1]);
+   if (ctx->notify_fd >= 0)
+      close(ctx->notify_fd);
 
    poll_list_deinit(ctx);
 
