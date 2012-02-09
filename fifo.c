@@ -55,6 +55,9 @@ struct maru_fifo
 
    /** Lock */
    pthread_mutex_t lock;
+
+   /** Tells if fifo is dead (killed by maru_fifo_kill_notification(). */
+   bool dead;
 };
 
 static inline void fifo_lock(maru_fifo *fifo)
@@ -74,7 +77,10 @@ void maru_fifo_free(maru_fifo *fifo)
 
    pthread_mutex_destroy(&fifo->lock);
 
-   maru_fifo_kill_notification(fifo);
+   if (fifo->read_fd >= 0)
+      close(fifo->read_fd);
+   if (fifo->write_fd >= 0)
+      close(fifo->write_fd);
 
    free(fifo->buffer);
    free(fifo);
@@ -378,12 +384,13 @@ poll_retry:
          ssize_t ret = maru_fifo_write(fifo, data + written,
                size - written);
 
-         maru_fifo_write_notify_ack(fifo);
-
          if (ret < 0)
             break;
 
          written += ret;
+
+         if (maru_fifo_write_notify_ack(fifo) != LIBMARU_SUCCESS)
+            break;
       }
       else if (fds.revents & (POLLHUP | POLLERR | POLLNVAL))
          break;
@@ -418,12 +425,13 @@ poll_retry:
          ssize_t ret = maru_fifo_read(fifo, data + has_read,
                size - has_read);
 
-         maru_fifo_read_notify_ack(fifo);
-
          if (ret < 0)
             break;
 
          has_read += ret;
+
+         if (maru_fifo_read_notify_ack(fifo) != LIBMARU_SUCCESS)
+            break;
       }
       else if (fds.revents & (POLLHUP | POLLERR | POLLNVAL))
          break;
@@ -452,29 +460,32 @@ static inline void maru_fifo_write_notify_ack_nolock(maru_fifo *fifo)
    }
 }
 
-void maru_fifo_read_notify_ack(maru_fifo *fifo)
+maru_error maru_fifo_read_notify_ack(maru_fifo *fifo)
 {
    fifo_lock(fifo);
-   maru_fifo_read_notify_ack_nolock(fifo);
+   maru_error ret = fifo->dead ? LIBMARU_ERROR_DEAD : LIBMARU_SUCCESS;
+   if (!fifo->dead)
+      maru_fifo_read_notify_ack_nolock(fifo);
    fifo_unlock(fifo);
+   return ret;
 }
 
-void maru_fifo_write_notify_ack(maru_fifo *fifo)
+maru_error maru_fifo_write_notify_ack(maru_fifo *fifo)
 {
    fifo_lock(fifo);
-   maru_fifo_write_notify_ack_nolock(fifo);
+   maru_error ret = fifo->dead ? LIBMARU_ERROR_DEAD : LIBMARU_SUCCESS;
+   if (!fifo->dead)
+      maru_fifo_write_notify_ack_nolock(fifo);
    fifo_unlock(fifo);
+   return ret;
 }
 
 void maru_fifo_kill_notification(maru_fifo *fifo)
 {
    fifo_lock(fifo);
-   if (fifo->write_fd >= 0)
-      close(fifo->write_fd);
-   if (fifo->read_fd >= 0)
-      close(fifo->read_fd);
-
-   fifo->write_fd = fifo->read_fd = -1;
+   fifo->dead = true;
+   write(fifo->write_fd, (uint64_t[]) {1}, sizeof(uint64_t));
+   write(fifo->read_fd, (uint64_t[]) {1}, sizeof(uint64_t));
    fifo_unlock(fifo);
 }
 

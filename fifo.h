@@ -49,7 +49,7 @@ void maru_fifo_free(maru_fifo *fifo);
  * After an event has been read, and the user has performed the needed operations on the buffer,
  * the buffer should be signaled with \c maru_fifo_write_notify_ack().
  *
- * Even after a POLLIN is received, it is possible that available write size is 0.
+ * Even after a POLLIN is received, it is possible that available write size is smaller than desired.
  * In this case, maru_fifo_write_notify_ack() must still be called.
  *
  * \param fifo The fifo
@@ -62,10 +62,15 @@ maru_fd maru_fifo_write_notify_fd(maru_fifo *fifo);
  *
  * This must be called after a POLLIN has been received by writer.
  * Clears out the event queue.
+ * If notifications have been killed with maru_fifo_kill_notification() earlier,
+ * return value will notify of a kill.
+ * If fifo is killed, event queue will not be cleared out when calling this function.
  *
  * \param fifo The fifo
+ * \returns Error code \ref maru_error.
+ * If error is returned, the fifo is dead, and cannot be used anymore.
  */
-void maru_fifo_write_notify_ack(maru_fifo *fifo);
+maru_error maru_fifo_write_notify_ack(maru_fifo *fifo);
 
 /** \ingroup buffer
  * \brief Get reader side notification handle for fifo.
@@ -86,6 +91,7 @@ maru_fd maru_fifo_read_notify_fd(maru_fifo *fifo);
  * 
  * Do note that using a trigger on both writes and reads could potentially lead to a deadlock if the triggers overlap.
  * This is typically the case if write_edge + read_edge >= buffer_size.
+ * This function will attempt to detect this case, but do not rely on it.
  * 
  * \param fifo The fifo
  * \param size The number of bytes that must be available at a minimum for POLLIN to occur.
@@ -102,6 +108,7 @@ maru_error maru_fifo_set_write_trigger(maru_fifo *fifo, size_t size);
  * 
  * Do note that using a trigger on both writes and reads could potentially lead to a deadlock if the triggers overlap.
  * This is typically the case if write_edge + read_edge >= buffer_size.
+ * This function will attempt to detect this case, but do not rely on it.
  * 
  * \param fifo The fifo
  * \param size The number of bytes that must be available at a minimum for POLLIN to occur.
@@ -115,14 +122,25 @@ maru_error maru_fifo_set_read_trigger(maru_fifo *fifo, size_t size);
  *
  * This must be called after a POLLIN has been received by reader.
  * Clears out the event queue.
+ * If notifications have been killed with maru_fifo_kill_notification() earlier,
+ * return value will notify of a kill.
+ * If fifo is killed, event queue will not be cleared out when calling this function.
  *
  * \param fifo The fifo
+ * \returns Error code \ref maru_error.
+ * If error is returned, the fifo is dead, and cannot be used anymore.
  */
-void maru_fifo_read_notify_ack(maru_fifo *fifo);
+maru_error maru_fifo_read_notify_ack(maru_fifo *fifo);
 
 /** \ingroup buffer
- * \brief Kill notification handles, polling notification handles
- * will give POLLHUP, allowing for clean tear-down in a threaded environment.
+ * \brief Kill notification handles.
+ * Polling notification handles after this will always give POLLIN,
+ * allowing for clean tear-down in a threaded environment.
+ * To detect that notification was killed,
+ * maru_fifo_read_notify_ack() and maru_fifo_write_notify_ack() will return error.
+ * 
+ * After killing notification it is still possible to perform writes and reads (to flush out the last data),
+ * but the blocking interfaces will return errors (even if there is data available).
  */
 void maru_fifo_kill_notification(maru_fifo *fifo);
 

@@ -55,6 +55,7 @@ typedef enum
                                    Often occurs if USB subsystem needs root privileges, and caller is a user. */
    LIBMARU_ERROR_INVALID   = -5, /**< Invalid argument */
    LIBMARU_ERROR_MEMORY    = -6, /**< Memory allocation error */
+   LIBMARU_ERROR_DEAD      = -7, /**< Data structure is dead */
    LIBMARU_ERROR_UNKNOWN   = INT_MIN /**< Unknown error (Also used to enforce int size of enum) */
 } maru_error;
 

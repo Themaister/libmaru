@@ -560,14 +560,8 @@ static size_t stream_chunk_size(struct maru_stream_internal *stream)
    return to_write;
 }
 
-static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream, bool cancel_buffers)
+static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream)
 {
-   if (cancel_buffers)
-   {
-      free_transfers_stream(ctx, stream);
-      return;
-   }
-
    ctx_lock(ctx);
 
    // It is possible that an open stream was suddenly closed.
@@ -591,7 +585,11 @@ static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream
          fprintf(stderr, "Enqueue transfer failed!\n");
    }
 
-   maru_fifo_read_notify_ack(stream->fifo);
+   if (maru_fifo_read_notify_ack(stream->fifo) != LIBMARU_SUCCESS)
+   {
+      free_transfers_stream(ctx, stream);
+      epoll_ctl(ctx->epfd, EPOLL_CTL_DEL, maru_fifo_read_notify_fd(stream->fifo), NULL);
+   }
 
 end:
    ctx_unlock(ctx);
@@ -673,10 +671,7 @@ poll_retry:
          struct maru_stream_internal *stream = NULL;
 
          if ((stream = fd_to_stream(ctx, fd)))
-         {
-            handle_stream(ctx, stream,
-                  events[i].events & (EPOLLHUP | EPOLLERR));
-         }
+            handle_stream(ctx, stream);
          else if (fd == ctx->quit_fd)
             alive = false;
          else
