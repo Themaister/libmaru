@@ -440,6 +440,11 @@ static void transfer_stream_cb(struct libusb_transfer *trans)
    if (transfer->stream->fifo && maru_fifo_read_unlock(transfer->stream->fifo, &transfer->region) != LIBMARU_SUCCESS)
       fprintf(stderr, "Stream callback: Failed to unlock fifo!\n");
 
+   maru_notification_cb cb = transfer->stream->write_cb;
+   void *userdata = transfer->stream->write_userdata;
+   if (cb)
+      cb(userdata);
+
    if (trans->status != LIBUSB_TRANSFER_COMPLETED)
       fprintf(stderr, "Stream callback: Failed transfer ...\n");
 }
