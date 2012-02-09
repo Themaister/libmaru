@@ -984,6 +984,12 @@ void maru_destroy_context(maru_context *ctx)
    if (ctx->conf)
       libusb_free_config_descriptor(ctx->conf);
 
+   if (ctx->handle)
+      libusb_close(ctx->handle);
+
+   if (ctx->ctx)
+      libusb_exit(ctx->ctx);
+
    free(ctx);
 }
 
