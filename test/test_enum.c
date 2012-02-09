@@ -42,7 +42,7 @@ int main(void)
 
       for (;;)
       {
-         char buf[256];
+         char buf[1024];
          ssize_t ret = read(0, buf, sizeof(buf));
          if (ret <= 0)
             break;
