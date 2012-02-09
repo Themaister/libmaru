@@ -398,8 +398,14 @@ size_t maru_fifo_blocking_write(maru_fifo *fifo,
    {
       struct pollfd fds = { .fd = fd, .events = POLLIN };
 
+poll_retry:
       if (poll(&fds, 1, -1) < 0)
+      {
+         if (errno == EINTR)
+            goto poll_retry;
+
          break;
+      }
 
       if (fds.revents & POLLIN)
       {
@@ -432,8 +438,14 @@ size_t maru_fifo_blocking_read(maru_fifo *fifo,
    {
       struct pollfd fds = { .fd = fd, .events = POLLIN };
 
+poll_retry:
       if (poll(&fds, 1, -1) < 0)
+      {
+         if (errno == EINTR)
+            goto poll_retry;
+
          break;
+      }
 
       if (fds.revents & POLLIN)
       {

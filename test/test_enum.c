@@ -48,7 +48,10 @@ int main(void)
             break;
 
          if (maru_stream_write(ctx, stream, buf, ret) < ret)
+         {
+            fprintf(stderr, "maru_stream_write() failed\n");
             break;
+         }
       }
 
       assert(maru_stream_close(ctx, stream) == LIBMARU_SUCCESS);

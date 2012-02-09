@@ -1184,7 +1184,10 @@ size_t maru_stream_write(maru_context *ctx, maru_stream stream,
 
    maru_fifo *fifo = ctx->streams[stream].fifo;
    if (!fifo)
+   {
+      fprintf(stderr, "Stream has no fifo!\n");
       return 0;
+   }
 
    return maru_fifo_blocking_write(fifo, data, size);
 }
