@@ -813,7 +813,7 @@ static bool init_stream_nolock(maru_context *ctx,
    }
 
    poll_list_add(&ctx->fds,
-         maru_fifo_read_notify_fd(str->fifo), POLLIN | POLLHUP);
+         maru_fifo_read_notify_fd(str->fifo), POLLIN | POLLHUP | POLLNVAL);
 
    // Notify thread that we have a new file descriptor.
    // Wakes up thread from eternal slumber.

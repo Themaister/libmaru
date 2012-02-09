@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sys/eventfd.h>
 
 struct maru_fifo
 {
@@ -40,15 +41,11 @@ struct maru_fifo
     * If no write lock is held, write_lock_begin will equal write_lock_end. */
    size_t write_lock_end;
 
-   /** Notification pipes for writer side.
-    * Dummy bytes will be written into write_pipe[1] to notify about
-    * data being available, to be polled by write_pipe[0]. */
-   maru_fd write_fd[2];
+   /** Notification fd for writer side. Uses Linux-specific eventfd. */
+   maru_fd write_fd;
 
-   /** Notification pipes for reader side.
-    * Dummy bytes will be written into read_pipe[1] to notify about
-    * data being available, to be polled by read_pipe[0]. */
-   maru_fd read_fd[2];
+   /** Notification pipes for reader side. Uses Linux-specific eventfd. */
+   maru_fd read_fd;
 
    /** Trigger for how many bytes must be available to issue a notification. */
    size_t read_trigger;
@@ -78,11 +75,6 @@ void maru_fifo_free(maru_fifo *fifo)
    pthread_mutex_destroy(&fifo->lock);
 
    maru_fifo_kill_notification(fifo);
-
-   if (fifo->write_fd[0] >= 0)
-      close(fifo->write_fd[0]);
-   if (fifo->read_fd[0] >= 0)
-      close(fifo->read_fd[0]);
 
    free(fifo->buffer);
    free(fifo);
@@ -119,8 +111,7 @@ maru_fifo *maru_fifo_new(size_t size)
    if (!fifo)
       goto error;
 
-   fifo->write_fd[0] = fifo->write_fd[1] =
-      fifo->read_fd[0] = fifo->read_fd[1] = -1;
+   fifo->write_fd = fifo->read_fd = -1;
 
    if (pthread_mutex_init(&fifo->lock, NULL) < 0)
       goto error;
@@ -135,31 +126,9 @@ maru_fifo *maru_fifo_new(size_t size)
    if (!fifo->buffer)
       goto error;
 
-   if (pipe(fifo->write_fd) < 0)
-      goto error;
-   if (pipe(fifo->read_fd) < 0)
-      goto error;
-
-   const int fds[4] = {
-      fifo->write_fd[0],
-      fifo->write_fd[1],
-      fifo->read_fd[0],
-      fifo->read_fd[1],
-   };
-
-   // Nonblock to avoid a theoretically
-   // possible scenario where we block when notifying
-   // reader/writer side.
-   // Also makes implementation simpler.
-   for (unsigned i = 0; i < 4; i++)
-   {
-      if (fcntl(fds[i], F_SETFL,
-               fcntl(fds[i], F_GETFL) | O_NONBLOCK) < 0)
-         goto error;
-   }
-
-   // Writer starts with POLLIN as buffer is empty.
-   if (write(fifo->write_fd[1], (uint8_t[]) {0}, 1) < 0)
+   fifo->write_fd = eventfd(1, 0);
+   fifo->read_fd = eventfd(0, 0);
+   if (fifo->write_fd < 0 || fifo->read_fd < 0)
       goto error;
 
    // Disable SIGPIPE for the off-chance that SIGPIPE kills our application when we're killing notification handles.
@@ -175,12 +144,12 @@ error:
 
 maru_fd maru_fifo_write_notify_fd(maru_fifo *fifo)
 {
-   return fifo->write_fd[0];
+   return fifo->write_fd;
 }
 
 maru_fd maru_fifo_read_notify_fd(maru_fifo *fifo)
 {
-   return fifo->read_fd[0];
+   return fifo->read_fd;
 }
 
 static inline size_t maru_fifo_read_avail_nolock(maru_fifo *fifo)
@@ -261,11 +230,9 @@ maru_error maru_fifo_write_unlock(maru_fifo *fifo,
    new_begin += region->second_size;
    fifo->write_lock_begin = new_begin;
 
-   if (maru_fifo_read_avail_nolock(fifo) >= fifo->read_trigger && fifo->read_fd[1] >= 0)
+   if (maru_fifo_read_avail_nolock(fifo) >= fifo->read_trigger && fifo->read_fd >= 0)
    {
-      // Signal reader that there is new data to be read.
-      if (write(fifo->read_fd[1], (uint8_t[]) {0}, 1) < 0 &&
-            errno != EAGAIN)
+      if (write(fifo->read_fd, (uint64_t[]) {1}, sizeof(uint64_t)) < (ssize_t)sizeof(uint64_t))
       {
          ret = LIBMARU_ERROR_IO;
          goto end;
@@ -327,11 +294,10 @@ maru_error maru_fifo_read_unlock(maru_fifo *fifo,
    new_begin += region->second_size;
    fifo->read_lock_begin = new_begin;
 
-   if (maru_fifo_write_avail_nolock(fifo) >= fifo->write_trigger && fifo->write_fd[1] >= 0)
+   if (maru_fifo_write_avail_nolock(fifo) >= fifo->write_trigger && fifo->write_fd >= 0)
    {
       // Signal writer that there is data available for writing.
-      if (write(fifo->write_fd[1], (uint8_t[]) {0}, 1) < 0 &&
-            errno != EAGAIN)
+      if (write(fifo->write_fd, (uint64_t[]) {1}, sizeof(uint64_t)) < (ssize_t)sizeof(uint64_t))
       {
          ret = LIBMARU_ERROR_INVALID;
          goto end;
@@ -468,22 +434,22 @@ poll_retry:
 
 static inline void maru_fifo_read_notify_ack_nolock(maru_fifo *fifo)
 {
-   char dummy[1024];
-   // Flush out all data.
-   while (read(fifo->read_fd[0], dummy, sizeof(dummy)) > 0);
-   // If there is still data to be read, poll() should give POLLIN.
-   if (maru_fifo_read_avail_nolock(fifo) >= fifo->read_trigger)
-      write(fifo->read_fd[1], (uint8_t[]) {0}, 1);
+   // Reset counter to 0 if there is no more data to read.
+   if (maru_fifo_read_avail_nolock(fifo) < fifo->read_trigger)
+   {
+      uint64_t val;
+      read(fifo->read_fd, &val, sizeof(val));
+   }
 }
 
 static inline void maru_fifo_write_notify_ack_nolock(maru_fifo *fifo)
 {
-   char dummy[1024];
-   // Flush out all data.
-   while (read(fifo->write_fd[0], dummy, sizeof(dummy)) > 0);
-   // If there is still data to write, poll() should give POLLIN.
-   if (maru_fifo_write_avail_nolock(fifo) >= fifo->write_trigger)
-      write(fifo->write_fd[1], (uint8_t[]) {0}, 1);
+   // Reset counter to 0 if there is no more data to write.
+   if (maru_fifo_write_avail_nolock(fifo) < fifo->write_trigger)
+   {
+      uint64_t val;
+      read(fifo->write_fd, &val, sizeof(val));
+   }
 }
 
 void maru_fifo_read_notify_ack(maru_fifo *fifo)
@@ -503,12 +469,12 @@ void maru_fifo_write_notify_ack(maru_fifo *fifo)
 void maru_fifo_kill_notification(maru_fifo *fifo)
 {
    fifo_lock(fifo);
-   if (fifo->write_fd[1] >= 0)
-      close(fifo->write_fd[1]);
-   if (fifo->read_fd[1] >= 0)
-      close(fifo->read_fd[1]);
+   if (fifo->write_fd >= 0)
+      close(fifo->write_fd);
+   if (fifo->read_fd >= 0)
+      close(fifo->read_fd);
 
-   fifo->write_fd[1] = fifo->read_fd[1] = -1;
+   fifo->write_fd = fifo->read_fd = -1;
    fifo_unlock(fifo);
 }
 
@@ -527,7 +493,6 @@ maru_error maru_fifo_set_write_trigger(maru_fifo *fifo, size_t size)
    }
 
    fifo->write_trigger = size;
-   maru_fifo_write_notify_ack_nolock(fifo);
 
 end:
    fifo_unlock(fifo);
@@ -549,7 +514,6 @@ maru_error maru_fifo_set_read_trigger(maru_fifo *fifo, size_t size)
    }
 
    fifo->read_trigger = size;
-   maru_fifo_read_notify_ack_nolock(fifo);
 
 end:
    fifo_unlock(fifo);
