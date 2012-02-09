@@ -237,13 +237,7 @@ maru_error maru_fifo_write_unlock(maru_fifo *fifo,
    fifo->write_lock_begin = new_begin;
 
    if (maru_fifo_read_avail_nolock(fifo) >= fifo->read_trigger && fifo->read_fd >= 0)
-   {
-      if (write(fifo->read_fd, (uint64_t[]) {1}, sizeof(uint64_t)) < (ssize_t)sizeof(uint64_t))
-      {
-         ret = LIBMARU_ERROR_IO;
-         goto end;
-      }
-   }
+      eventfd_write(fifo->read_fd, 1);
 
 end:
    fifo_unlock(fifo);
@@ -301,14 +295,7 @@ maru_error maru_fifo_read_unlock(maru_fifo *fifo,
    fifo->read_lock_begin = new_begin;
 
    if (maru_fifo_write_avail_nolock(fifo) >= fifo->write_trigger && fifo->write_fd >= 0)
-   {
-      // Signal writer that there is data available for writing.
-      if (write(fifo->write_fd, (uint64_t[]) {1}, sizeof(uint64_t)) < (ssize_t)sizeof(uint64_t))
-      {
-         ret = LIBMARU_ERROR_INVALID;
-         goto end;
-      }
-   }
+      eventfd_write(fifo->write_fd, 1);
 
 end:
    fifo_unlock(fifo);
@@ -445,8 +432,8 @@ static inline void maru_fifo_read_notify_ack_nolock(maru_fifo *fifo)
    // Reset counter to 0 if there is no more data to read.
    if (maru_fifo_read_avail_nolock(fifo) < fifo->read_trigger)
    {
-      uint64_t val;
-      read(fifo->read_fd, &val, sizeof(val));
+      eventfd_t val;
+      eventfd_read(fifo->read_fd, &val);
    }
 }
 
@@ -455,8 +442,8 @@ static inline void maru_fifo_write_notify_ack_nolock(maru_fifo *fifo)
    // Reset counter to 0 if there is no more data to write.
    if (maru_fifo_write_avail_nolock(fifo) < fifo->write_trigger)
    {
-      uint64_t val;
-      read(fifo->write_fd, &val, sizeof(val));
+      eventfd_t val;
+      eventfd_read(fifo->write_fd, &val);
    }
 }
 
@@ -484,8 +471,8 @@ void maru_fifo_kill_notification(maru_fifo *fifo)
 {
    fifo_lock(fifo);
    fifo->dead = true;
-   write(fifo->write_fd, (uint64_t[]) {1}, sizeof(uint64_t));
-   write(fifo->read_fd, (uint64_t[]) {1}, sizeof(uint64_t));
+   eventfd_write(fifo->write_fd, 1);
+   eventfd_write(fifo->read_fd, 1);
    fifo_unlock(fifo);
 }
 
