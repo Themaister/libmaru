@@ -965,9 +965,6 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
    if (socketpair(AF_UNIX, SOCK_STREAM, 0, context->volume_fd) < 0)
       goto error;
 
-   fprintf(stderr, "Created socketpair: %d - %d\n",
-         context->volume_fd[0], context->volume_fd[1]);
-
    if (fcntl(context->volume_fd[0], F_SETFL,
             fcntl(context->volume_fd[0], F_GETFL) | O_NONBLOCK) < 0)
       goto error;
