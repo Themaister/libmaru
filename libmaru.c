@@ -314,14 +314,13 @@ static bool poll_list_init(maru_context *ctx)
       tmp++;
    }
 
-   // POLLHUP is ignored by poll() in events, but this will simplify our code.
    if (!poll_list_add(ctx->epfd, ctx->quit_fd, POLLIN))
    {
       ret = false;
       goto end;
    }
 
-   if (!poll_list_add(ctx->epfd, ctx->volume_fd[1], POLLIN))
+   if (!poll_list_add(ctx->epfd, ctx->volume_fd[0], POLLIN))
    {
       ret = false;
       goto end;
@@ -708,6 +707,7 @@ static void transfer_control_cb(struct libusb_transfer *trans)
 static void handle_volume(maru_context *ctx,
       int fd)
 {
+   fprintf(stderr, "Handling volume request!\n");
    struct maru_volume_request req;
    if (read(fd, &req, sizeof(req) != (ssize_t)sizeof(req)))
       return;
@@ -764,6 +764,12 @@ static void *thread_entry(void *data)
    maru_context *ctx = data;
 
    bool alive = true;
+
+   fprintf(stderr, "Reading from FD = %d\n", ctx->volume_fd[0]);
+   struct maru_volume_request req;
+   ssize_t ret = read(ctx->volume_fd[0], &req, sizeof(req));
+   fprintf(stderr, "Read data size = %zi\n", ret);
+
    while (alive)
    {
       struct epoll_event events[16];
@@ -790,7 +796,7 @@ poll_retry:
             handle_stream(ctx, stream);
          else if (fd == ctx->quit_fd)
             alive = false;
-         else if (fd == ctx->volume_fd[1])
+         else if (fd == ctx->volume_fd[0])
             handle_volume(ctx, fd);
          else
             libusb_event = true;
@@ -965,12 +971,15 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
    if (socketpair(AF_UNIX, SOCK_STREAM, 0, context->volume_fd) < 0)
       goto error;
 
-   if (fcntl(context->volume_fd[0], F_SETFL,
-            fcntl(context->volume_fd[0], F_GETFL) | O_NONBLOCK) < 0)
-      goto error;
-   if (fcntl(context->volume_fd[1], F_SETFL,
-            fcntl(context->volume_fd[1], F_GETFL) | O_NONBLOCK) < 0)
-      goto error;
+   fprintf(stderr, "Created socketpair: %d - %d\n",
+         context->volume_fd[0], context->volume_fd[1]);
+
+   //if (fcntl(context->volume_fd[0], F_SETFL,
+   //         fcntl(context->volume_fd[0], F_GETFL) | O_NONBLOCK) < 0)
+   //   goto error;
+   //if (fcntl(context->volume_fd[1], F_SETFL,
+   //         fcntl(context->volume_fd[1], F_GETFL) | O_NONBLOCK) < 0)
+   //   goto error;
 
    if (context->quit_fd < 0 ||
          context->epfd < 0)
@@ -1261,16 +1270,33 @@ size_t maru_stream_write_avail(maru_context *ctx, maru_stream stream)
 static maru_error perform_request(maru_context *ctx,
       maru_volume_t *vol, uint8_t request, maru_usec timeout)
 {
-   struct maru_volume_request req = {
+   const struct maru_volume_request req = {
       .count = ctx->volume_count++,
       .request = request,
       .volume = *vol,
-      .reply_fd = ctx->volume_fd[1],
+      .reply_fd = ctx->volume_fd[0],
    };
 
-   if (write(ctx->volume_fd[0],
+   fprintf(stderr, "Sending volume request ...\n");
+
+   fprintf(stderr, "Writing to FD = %d\n", ctx->volume_fd[1]);
+   if (write(ctx->volume_fd[1],
             &req, sizeof(req) != (ssize_t)sizeof(req)))
       return LIBMARU_ERROR_IO;
+
+   struct pollfd fds = {
+      .fd = ctx->volume_fd[0],
+      .events = POLLIN,
+   };
+
+   // Verify that the socketpair is sane.
+   if (poll(&fds, 1, 0) < 0)
+      return LIBMARU_ERROR_IO;
+   if (!(fds.revents & POLLIN))
+   {
+      fprintf(stderr, "socketpair is not pollable ...\n");
+      return LIBMARU_ERROR_IO;
+   }
 
    struct maru_volume_request ret_req;
 
@@ -1278,7 +1304,7 @@ static maru_error perform_request(maru_context *ctx,
    {
       // Wait for reply from thread.
       struct pollfd fds = {
-         .fd = ctx->volume_fd[0],
+         .fd = ctx->volume_fd[1],
          .events = POLLIN,
       };
 
@@ -1297,7 +1323,7 @@ poll_retry:
       if (!(fds.revents & POLLIN))
          return LIBMARU_ERROR_TIMEOUT;
 
-      if (read(ctx->volume_fd[0],
+      if (read(ctx->volume_fd[1],
                &ret_req, sizeof(ret_req) != (ssize_t)sizeof(ret_req)))
          return LIBMARU_ERROR_IO;
 
@@ -1357,5 +1383,4 @@ maru_error maru_stream_set_volume(maru_context *ctx,
 
    return perform_request(ctx, &volume, USB_REQUEST_UAC_SET_CUR, timeout);
 }
-
 

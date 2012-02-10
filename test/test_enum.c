@@ -24,6 +24,10 @@ int main(void)
       assert(maru_create_context_from_vid_pid(&ctx, list[0].vendor_id,
                list[0].product_id) == LIBMARU_SUCCESS);
 
+      maru_error err = maru_stream_set_volume(ctx, LIBMARU_STREAM_MASTER, -10 * 256, 5000000);
+      if (err < 0)
+         fprintf(stderr, "Error = %d\n", err);
+
       fprintf(stderr, "Streams: %d\n", maru_get_num_streams(ctx));
 
       int stream = maru_find_available_stream(ctx);
