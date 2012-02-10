@@ -56,6 +56,7 @@ typedef enum
    LIBMARU_ERROR_INVALID   = -5, /**< Invalid argument */
    LIBMARU_ERROR_MEMORY    = -6, /**< Memory allocation error */
    LIBMARU_ERROR_DEAD      = -7, /**< Data structure is dead */
+   LIBMARU_ERROR_TIMEOUT   = -8, /**< Request timed out */
    LIBMARU_ERROR_UNKNOWN   = INT_MIN /**< Unknown error (Also used to enforce int size of enum) */
 } maru_error;
 
@@ -274,6 +275,72 @@ void maru_stream_set_error_notification(maru_context *ctx, maru_stream stream,
  * \returns Latency in microseconds, or a negative number if error \ref maru_error.
  */
 maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream);
+
+/**
+ * \brief Typedef for a volume value. It is encoded in dB fixed point
+ * where the actual value is (val) / 256.0. The number is signed and matches
+ * the USB audio specification. */
+typedef int16_t maru_volume_t;
+
+/**
+ * \brief Pseudo-stream that represents the final output stream (after mixing).
+ * Only to be used with the volume control. */
+#define LIBMARU_STREAM_MASTER ((maru_stream)-1)
+
+/**
+ * \brief Pseudo-volume representing mute */
+#define LIBMARU_VOLUME_MUTE ((maru_volume_t)-0x8000)
+
+/** \ingroup stream
+ * \brief Gets available volume range for stream.
+ *
+ * This operation is blocking, as requests have to be asynchronously
+ * issues to the USB subsystem.
+ * Considerations must be made if this function is to be used in
+ * a GUI or similar where blocking operations are bad.
+ * A control request like this can usually be completed in the order of
+ * 5ms.
+ *
+ * A volume request can be performed concurrently with other stream calls, however, only one thread can perform volume handling at a time.
+ *
+ * \param ctx libmaru context
+ * \param stream Stream to query.
+ * If stream is set to the pseudo-stream LIBMARU_STREAM_MASTER,
+ * volume control for the mixer output (master) is queried.
+ *
+ * \param current Outputs current volume. Can be NULL if this information is not required.
+ * \param min Outputs minimum volume. Can be NULL if this information is not required.
+ * \param max Outputs maximum volume. Can be NULL if this information is not required.
+ * \param timeout Timeout for volume control in microseconds \ref maru_usec.
+ * A timeout of 0 will in practice never work. A negative timeout will block until completion
+ * or error has occured.
+ * This timeout is per request. If current, min and max are all desired, the timeout will be applied
+ * per request, effectively tripling the timeout.
+ * \returns Error code \ref maru_error
+ */
+maru_error maru_stream_get_volume(maru_context *ctx,
+      maru_stream stream,
+      maru_volume_t *current, maru_volume_t *min, maru_volume_t *max,
+      maru_usec timeout);
+
+/** \ingroup stream
+ * \brief Sets volume for a stream.
+ *
+ * This function behaves similar to maru_stream_get_volume(). See its reference for considerations on use.
+ *
+ * \param ctx libmaru context
+ * \param stream Stream to set volume to.
+ * If stream is set to the pseudo-stream LIBMARU_STREAM_MASTER, volume for mixer output (master) is set.
+ * \param volume Volume to set. See \ref maru_volume_t on how the volume should be encoded.
+ * \param timeout Timeout of request. See maru_stream_get_volume() for more considerations.
+ * Volume can also be set to the LIBMARU_VOLUME_MUTE constant to mute.
+ *
+ * \returns Error code \ref maru_error.
+ */
+maru_error maru_stream_set_volume(maru_context *ctx,
+      maru_stream stream,
+      maru_volume_t volume,
+      maru_usec timeout);
 
 #ifdef __cplusplus
 }

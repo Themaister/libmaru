@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <sys/eventfd.h>
 #include <sys/epoll.h>
+#include <sys/socket.h>
 
 struct maru_transfer
 {
@@ -63,6 +64,8 @@ struct maru_context
    unsigned stream_interface;
    int quit_fd;
    int notify_fd;
+   int volume_fd[2];
+   uint64_t volume_count;
 
    int epfd;
 
@@ -98,6 +101,27 @@ struct usb_uas_format_descriptor
 #define USB_FREQ_TYPE_DIRECT           0x01
 
 #define USB_AUDIO_FEEDBACK_SIZE        3
+
+#define USB_REQUEST_UAC_SET_CUR        0x01
+#define USB_REQUEST_UAC_GET_CUR        0x81
+#define USB_REQUEST_UAC_GET_MIN        0x82
+#define USB_REQUEST_UAC_GET_MAX        0x83
+#define USB_REQUEST_DIR_MASK           0x80
+
+struct maru_volume_request
+{
+   uint64_t count;
+   uint8_t request;
+   maru_volume_t volume;
+   maru_error error;
+   int reply_fd;
+};
+
+struct maru_volume_request_buf
+{
+   struct maru_volume_request req;
+   uint8_t buffer[sizeof(struct libusb_control_setup) + sizeof(int16_t)];
+};
 
 static inline bool interface_is_class(const struct libusb_interface_descriptor *iface, unsigned class)
 {
@@ -292,6 +316,12 @@ static bool poll_list_init(maru_context *ctx)
 
    // POLLHUP is ignored by poll() in events, but this will simplify our code.
    if (!poll_list_add(ctx->epfd, ctx->quit_fd, POLLIN))
+   {
+      ret = false;
+      goto end;
+   }
+
+   if (!poll_list_add(ctx->epfd, ctx->volume_fd[1], POLLIN))
    {
       ret = false;
       goto end;
@@ -643,6 +673,92 @@ static void kill_write_notifications(maru_context *ctx)
    ctx_unlock(ctx);
 }
 
+static void transfer_control_cb(struct libusb_transfer *trans)
+{
+   struct maru_volume_request_buf *buf = trans->user_data;
+
+   if (buf->req.request & USB_REQUEST_DIR_MASK)
+   {
+      uint16_t val;
+      memcpy(&val, libusb_control_transfer_get_data(trans), sizeof(val));
+      buf->req.volume = (maru_volume_t)libusb_le16_to_cpu(val);
+   }
+
+   switch (trans->status)
+   {
+      case LIBUSB_TRANSFER_COMPLETED:
+         buf->req.error = LIBMARU_SUCCESS;
+         break;
+         
+      case LIBUSB_TRANSFER_TIMED_OUT:
+         buf->req.error = LIBMARU_ERROR_TIMEOUT;
+         break;
+
+      default:
+         buf->req.error = LIBMARU_ERROR_IO;
+         break;
+   }
+
+   write(buf->req.reply_fd, &buf->req, sizeof(buf->req));
+
+   free(buf);
+   libusb_free_transfer(trans);
+}
+
+static void handle_volume(maru_context *ctx,
+      int fd)
+{
+   struct maru_volume_request req;
+   if (read(fd, &req, sizeof(req) != (ssize_t)sizeof(req)))
+      return;
+
+   struct libusb_transfer *trans = libusb_alloc_transfer(0);
+   if (!trans)
+   {
+      req.error = LIBMARU_ERROR_MEMORY;
+      write(req.reply_fd, &req, sizeof(req));
+      return;
+   }
+
+   struct maru_volume_request_buf *buf = calloc(1, sizeof(*buf));
+   if (!buf)
+   {
+      req.error = LIBMARU_ERROR_MEMORY;
+      write(req.reply_fd, &req, sizeof(req));
+      return;
+   }
+
+   libusb_fill_control_setup(buf->buffer,
+         LIBUSB_REQUEST_TYPE_CLASS | (req.request & USB_REQUEST_DIR_MASK),
+         req.request,
+         2 << 8, // Volume only for now.
+         0,
+         sizeof(int16_t));
+
+   buf->req = req;
+   libusb_fill_control_transfer(trans,
+         ctx->handle,
+         buf->buffer,
+         transfer_control_cb,
+         buf,
+         5000);
+
+   if (!(req.request & USB_REQUEST_DIR_MASK))
+   {
+      uint16_t vol = libusb_cpu_to_le16(req.volume);
+      memcpy(libusb_control_transfer_get_data(trans), &vol, sizeof(vol));
+   }
+
+   if (libusb_submit_transfer(trans) < 0)
+   {
+      free(buf);
+      libusb_free_transfer(trans);
+
+      req.error = LIBMARU_ERROR_IO;
+      write(req.reply_fd, &req, sizeof(req));
+   }
+}
+
 static void *thread_entry(void *data)
 {
    maru_context *ctx = data;
@@ -674,6 +790,8 @@ poll_retry:
             handle_stream(ctx, stream);
          else if (fd == ctx->quit_fd)
             alive = false;
+         else if (fd == ctx->volume_fd[1])
+            handle_volume(ctx, fd);
          else
             libusb_event = true;
       }
@@ -844,6 +962,15 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
 
    context->quit_fd = eventfd(0, 0);
    context->epfd = epoll_create(16);
+   if (socketpair(AF_UNIX, SOCK_STREAM, 0, context->volume_fd) < 0)
+      goto error;
+
+   if (fcntl(context->volume_fd[0], F_SETFL,
+            fcntl(context->volume_fd[0], F_GETFL) | O_NONBLOCK) < 0)
+      goto error;
+   if (fcntl(context->volume_fd[1], F_SETFL,
+            fcntl(context->volume_fd[1], F_GETFL) | O_NONBLOCK) < 0)
+      goto error;
 
    if (context->quit_fd < 0 ||
          context->epfd < 0)
@@ -895,11 +1022,16 @@ void maru_destroy_context(maru_context *ctx)
 
    if (ctx->quit_fd >= 0)
    {
-      write(ctx->quit_fd, (uint64_t[]) {1}, sizeof(uint64_t));
+      eventfd_write(ctx->quit_fd, 1);
       if (ctx->thread)
          pthread_join(ctx->thread, NULL);
       close(ctx->quit_fd);
    }
+
+   if (ctx->volume_fd[0] >= 0)
+      close(ctx->volume_fd[0]);
+   if (ctx->volume_fd[1] >= 0)
+      close(ctx->volume_fd[1]);
 
    poll_list_deinit(ctx);
 
@@ -1125,4 +1257,105 @@ size_t maru_stream_write_avail(maru_context *ctx, maru_stream stream)
 
    return maru_fifo_write_avail(fifo);
 }
+
+static maru_error perform_request(maru_context *ctx,
+      maru_volume_t *vol, uint8_t request, maru_usec timeout)
+{
+   struct maru_volume_request req = {
+      .count = ctx->volume_count++,
+      .request = request,
+      .volume = *vol,
+      .reply_fd = ctx->volume_fd[1],
+   };
+
+   if (write(ctx->volume_fd[0],
+            &req, sizeof(req) != (ssize_t)sizeof(req)))
+      return LIBMARU_ERROR_IO;
+
+   struct maru_volume_request ret_req;
+
+   do
+   {
+      // Wait for reply from thread.
+      struct pollfd fds = {
+         .fd = ctx->volume_fd[0],
+         .events = POLLIN,
+      };
+
+poll_retry:
+      if (poll(&fds, 1, timeout < 0 ? -1 : timeout / 1000) < 0)
+      {
+         if (errno == EINTR)
+            goto poll_retry;
+
+         return LIBMARU_ERROR_IO;
+      }
+
+      if (fds.revents & (POLLHUP | POLLERR | POLLNVAL))
+         return LIBMARU_ERROR_IO;
+
+      if (!(fds.revents & POLLIN))
+         return LIBMARU_ERROR_TIMEOUT;
+
+      if (read(ctx->volume_fd[0],
+               &ret_req, sizeof(ret_req) != (ssize_t)sizeof(ret_req)))
+         return LIBMARU_ERROR_IO;
+
+   } while (ret_req.count != req.count);
+
+   *vol = ret_req.volume;
+   return ret_req.error;
+}
+
+maru_error maru_stream_get_volume(maru_context *ctx,
+      maru_stream stream,
+      maru_volume_t *current, maru_volume_t *min, maru_volume_t *max,
+      maru_usec timeout)
+{
+   // Only support master channel volume for now.
+   if (stream != LIBMARU_STREAM_MASTER)
+      return LIBMARU_ERROR_INVALID;
+
+   if (current)
+   {
+      maru_error err = perform_request(ctx, current,
+            USB_REQUEST_UAC_GET_CUR, timeout);
+
+      if (err != LIBMARU_SUCCESS)
+         return err;
+   }
+
+   if (min)
+   {
+      maru_error err = perform_request(ctx, current,
+            USB_REQUEST_UAC_GET_MIN, timeout);
+
+      if (err != LIBMARU_SUCCESS)
+         return err;
+   }
+
+   if (max)
+   {
+      maru_error err = perform_request(ctx, current,
+            USB_REQUEST_UAC_GET_MAX, timeout);
+
+      if (err != LIBMARU_SUCCESS)
+         return err;
+   }
+
+   return LIBMARU_SUCCESS;
+}
+
+maru_error maru_stream_set_volume(maru_context *ctx,
+      maru_stream stream,
+      maru_volume_t volume,
+      maru_usec timeout)
+{
+   // Only support master channel volume for now.
+   if (stream != LIBMARU_STREAM_MASTER)
+      return LIBMARU_ERROR_INVALID;
+
+   return perform_request(ctx, &volume, USB_REQUEST_UAC_SET_CUR, timeout);
+}
+
 
