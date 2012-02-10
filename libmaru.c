@@ -707,9 +707,8 @@ static void transfer_control_cb(struct libusb_transfer *trans)
 static void handle_volume(maru_context *ctx,
       int fd)
 {
-   fprintf(stderr, "Handling volume request!\n");
    struct maru_volume_request req;
-   if (read(fd, &req, sizeof(req) != (ssize_t)sizeof(req)))
+   if (read(fd, &req, sizeof(req)) != (ssize_t)sizeof(req))
       return;
 
    struct libusb_transfer *trans = libusb_alloc_transfer(0);
@@ -764,11 +763,6 @@ static void *thread_entry(void *data)
    maru_context *ctx = data;
 
    bool alive = true;
-
-   fprintf(stderr, "Reading from FD = %d\n", ctx->volume_fd[0]);
-   struct maru_volume_request req;
-   ssize_t ret = read(ctx->volume_fd[0], &req, sizeof(req));
-   fprintf(stderr, "Read data size = %zi\n", ret);
 
    while (alive)
    {
@@ -974,12 +968,12 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
    fprintf(stderr, "Created socketpair: %d - %d\n",
          context->volume_fd[0], context->volume_fd[1]);
 
-   //if (fcntl(context->volume_fd[0], F_SETFL,
-   //         fcntl(context->volume_fd[0], F_GETFL) | O_NONBLOCK) < 0)
-   //   goto error;
-   //if (fcntl(context->volume_fd[1], F_SETFL,
-   //         fcntl(context->volume_fd[1], F_GETFL) | O_NONBLOCK) < 0)
-   //   goto error;
+   if (fcntl(context->volume_fd[0], F_SETFL,
+            fcntl(context->volume_fd[0], F_GETFL) | O_NONBLOCK) < 0)
+      goto error;
+   if (fcntl(context->volume_fd[1], F_SETFL,
+            fcntl(context->volume_fd[1], F_GETFL) | O_NONBLOCK) < 0)
+      goto error;
 
    if (context->quit_fd < 0 ||
          context->epfd < 0)
@@ -1277,26 +1271,8 @@ static maru_error perform_request(maru_context *ctx,
       .reply_fd = ctx->volume_fd[0],
    };
 
-   fprintf(stderr, "Sending volume request ...\n");
-
-   fprintf(stderr, "Writing to FD = %d\n", ctx->volume_fd[1]);
-   if (write(ctx->volume_fd[1],
-            &req, sizeof(req) != (ssize_t)sizeof(req)))
+   if (write(ctx->volume_fd[1], &req, sizeof(req)) != (ssize_t)sizeof(req))
       return LIBMARU_ERROR_IO;
-
-   struct pollfd fds = {
-      .fd = ctx->volume_fd[0],
-      .events = POLLIN,
-   };
-
-   // Verify that the socketpair is sane.
-   if (poll(&fds, 1, 0) < 0)
-      return LIBMARU_ERROR_IO;
-   if (!(fds.revents & POLLIN))
-   {
-      fprintf(stderr, "socketpair is not pollable ...\n");
-      return LIBMARU_ERROR_IO;
-   }
 
    struct maru_volume_request ret_req;
 
@@ -1323,8 +1299,7 @@ poll_retry:
       if (!(fds.revents & POLLIN))
          return LIBMARU_ERROR_TIMEOUT;
 
-      if (read(ctx->volume_fd[1],
-               &ret_req, sizeof(ret_req) != (ssize_t)sizeof(ret_req)))
+      if (read(ctx->volume_fd[1], &ret_req, sizeof(ret_req)) != (ssize_t)sizeof(ret_req))
          return LIBMARU_ERROR_IO;
 
    } while (ret_req.count != req.count);
@@ -1353,7 +1328,7 @@ maru_error maru_stream_get_volume(maru_context *ctx,
 
    if (min)
    {
-      maru_error err = perform_request(ctx, current,
+      maru_error err = perform_request(ctx, min,
             USB_REQUEST_UAC_GET_MIN, timeout);
 
       if (err != LIBMARU_SUCCESS)
@@ -1362,7 +1337,7 @@ maru_error maru_stream_get_volume(maru_context *ctx,
 
    if (max)
    {
-      maru_error err = perform_request(ctx, current,
+      maru_error err = perform_request(ctx, max,
             USB_REQUEST_UAC_GET_MAX, timeout);
 
       if (err != LIBMARU_SUCCESS)
