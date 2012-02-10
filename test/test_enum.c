@@ -50,6 +50,8 @@ int main(void)
 
       assert(maru_stream_open(ctx, stream, desc) == LIBMARU_SUCCESS);
 
+      size_t total_write = 0;
+      bool toggle = false;
       for (;;)
       {
          char buf[1024];
@@ -61,6 +63,14 @@ int main(void)
          {
             fprintf(stderr, "maru_stream_write() failed\n");
             break;
+         }
+
+         total_write += ret;
+         if (total_write > 100000)
+         {
+            toggle ^= true;
+            maru_stream_set_volume(ctx, LIBMARU_STREAM_MASTER, toggle ? -20 * 256 : -10 * 256, 1000000);
+            total_write -= 100000;
          }
       }
 
