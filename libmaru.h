@@ -160,10 +160,29 @@ struct maru_stream_desc
    unsigned bits;
 
    /** Desired buffer size in bytes. This value might not be honored exactly.
-    * It is not set by \c maru_get_stream_desc().
-    * If a buffer size of 0 is passed to \c maru_open_stream(),
+    * It is not set by maru_get_stream_desc().
+    * If a buffer size of 0 is passed to maru_open_stream(),
     * it will attempt to find some appropriate buffer size. */
    size_t buffer_size;
+
+   /** Fragment size of writes, the minimum data that must be available
+    * for writing for the fifo to notify blocking write functions.
+    *
+    * It is not set by maru_get_stream_desc().
+    *
+    * A higher value here is good for CPU usage
+    * as data will be moved in larger chunks, which means less polling.
+    * A higher fragment size will lead to more latency,
+    * but is recommended for non-latency critical applications like audio players and video players where you want to reduce CPU usage of audio as much as possible.
+    *
+    * A common fragment size is 1/4th or 1/8th the size of the buffer.
+    * If you plan to write a constant amount of data every blocking write,
+    * that size should be used as fragment_size to optimize a blocking write to a single poll.
+    *
+    * If a fragment size of 0 is passed to maru_open_stream(),
+    * it will attempt to find some appropriate value from the buffer size.
+    */
+   size_t fragment_size;
 
    /** Might be set by \c maru_get_stream_desc() if the endpoint supports continous sample rates.
     * \ref sample_rate will not be set to an appropriate value if these fields are set. */

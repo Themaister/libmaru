@@ -864,6 +864,19 @@ static bool init_stream_nolock(maru_context *ctx,
       return false;
    }
 
+   // Set write fragment size.
+   size_t frag_size = desc->fragment_size;
+   if (!frag_size)
+      frag_size = buffer_size >> 2;
+
+   if (maru_fifo_set_write_trigger(str->fifo,
+            frag_size) < 0)
+   {
+      maru_fifo_free(str->fifo);
+      str->fifo = NULL;
+      return false;
+   }
+
    poll_list_add(ctx->epfd,
          maru_fifo_read_notify_fd(str->fifo), POLLIN);
 
