@@ -168,6 +168,11 @@ static inline size_t maru_fifo_write_avail_nolock(maru_fifo *fifo)
    return (fifo->read_lock_begin + fifo->buffer_size - fifo->write_lock_end - 1) & fifo->buffer_mask;
 }
 
+size_t maru_fifo_buffered_size(maru_fifo *fifo)
+{
+   return fifo->buffer_size - maru_fifo_write_avail(fifo) - 1;
+}
+
 size_t maru_fifo_read_avail(maru_fifo *fifo)
 {
    fifo_lock(fifo);

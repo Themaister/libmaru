@@ -73,6 +73,14 @@ maru_fd maru_fifo_write_notify_fd(maru_fifo *fifo);
 maru_error maru_fifo_write_notify_ack(maru_fifo *fifo);
 
 /** \ingroup buffer
+ * \brief Get total amount of data currently in buffer.
+ *
+ * Functionally equivalent to buffer_size - writable_size - 1.
+ * Useful in audio cases to calculate latency.
+ */
+size_t maru_fifo_buffered_size(maru_fifo *fifo);
+
+/** \ingroup buffer
  * \brief Get reader side notification handle for fifo.
  *
  * This function is the analog for \ref maru_fifo_write_notify_fd.

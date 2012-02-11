@@ -43,6 +43,7 @@ struct maru_stream_internal
    uint32_t transfer_speed;
    uint32_t transfer_speed_fraction;
    unsigned transfer_speed_mult;
+   size_t bps;
 
    maru_notification_cb write_cb;
    void *write_userdata;
@@ -886,6 +887,7 @@ static bool init_stream_nolock(maru_context *ctx,
    str->transfer_speed_fraction <<= 16;
    str->transfer_speed_fraction /= 1000;
 
+   str->bps = desc->sample_rate * desc->channels * desc->bits / 8;
    str->transfer_speed = str->transfer_speed_fraction;
    
    return true;
@@ -1367,5 +1369,16 @@ maru_error maru_stream_set_volume(maru_context *ctx,
       return LIBMARU_ERROR_INVALID;
 
    return perform_request(ctx, &volume, USB_REQUEST_UAC_SET_CUR, timeout);
+}
+
+maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream)
+{
+   if (stream >= ctx->num_streams)
+      return LIBMARU_ERROR_INVALID;
+
+   if (!ctx->streams[stream].fifo)
+      return LIBMARU_ERROR_INVALID;
+
+   return (maru_fifo_buffered_size(ctx->streams[stream].fifo) * INT64_C(1000000)) / ctx->streams[stream].bps;
 }
 
