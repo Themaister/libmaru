@@ -812,9 +812,11 @@ poll_retry:
 
 static bool add_stream(maru_context *ctx, unsigned stream_ep, unsigned feedback_ep)
 {
-   ctx->streams = realloc(ctx->streams, (ctx->num_streams + 1) * sizeof(*ctx->streams));
-   if (!ctx->streams)
+   struct maru_stream_internal *new_streams = realloc(ctx->streams, (ctx->num_streams + 1) * sizeof(*ctx->streams));
+   if (!new_streams)
       return false;
+
+   ctx->streams = new_streams;
 
    ctx->streams[ctx->num_streams] = (struct maru_stream_internal) {
       .stream_ep = stream_ep,
