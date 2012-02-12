@@ -48,13 +48,16 @@ int main(void)
       fprintf(stderr, "\tChannels: %u\n", desc[0].channels);
       fprintf(stderr, "\tBits: %u\n", desc[0].bits);
 
+      desc[0].buffer_size = 1024 * 16;
+      desc[0].fragment_size = 1024 * 4;
+
       assert(maru_stream_open(ctx, stream, desc) == LIBMARU_SUCCESS);
 
       size_t total_write = 0;
       bool toggle = false;
       for (;;)
       {
-         char buf[1024];
+         char buf[1024 * 4];
          ssize_t ret = read(0, buf, sizeof(buf));
          if (ret <= 0)
             break;

@@ -605,7 +605,13 @@ static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream
    size_t avail = maru_fifo_read_avail(stream->fifo);
    size_t to_write = stream_chunk_size(stream);
 
-   if (avail >= to_write)
+#define USB_MAX_ENQUEUE_COUNT 32
+
+   // Don't enqueue too many buffers at a time or we may desync (async).
+   // Ideally we should be able to enqueue everything in one go as one single transfer, to avoid redundant locking
+   // when each individual transfer completes, but this simplifies code for now.
+   // But this should do to keep polling frequency as low as possible.
+   for (unsigned count = 0; avail >= to_write && count < USB_MAX_ENQUEUE_COUNT; count++, avail -= to_write)
    {
       struct maru_fifo_locked_region region;
       maru_fifo_read_lock(stream->fifo, to_write,
@@ -613,6 +619,8 @@ static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream
 
       if (!enqueue_transfer(ctx, stream, &region))
          fprintf(stderr, "Enqueue transfer failed!\n");
+
+      to_write = stream_chunk_size(stream);
    }
 
    if (maru_fifo_read_notify_ack(stream->fifo) != LIBMARU_SUCCESS)
