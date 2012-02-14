@@ -616,15 +616,10 @@ static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream
    size_t total_write = 0;
 
    size_t to_write = stream_chunk_size(stream);
-
-   // Don't enqueue too many buffers at a time or we may desync (async).
-   // Ideally we should be able to enqueue everything in one go as one single transfer, to avoid redundant locking
-   // when each individual transfer completes, but this simplifies code for now.
-   // But this should do to keep polling frequency as low as possible.
-   for (; avail >= to_write && packets < LIBMARU_MAX_ENQUEUE_COUNT; packets++)
+   while (avail >= to_write && packets < LIBMARU_MAX_ENQUEUE_COUNT)
    {
       total_write += to_write;
-      packet_len[packets] = to_write;
+      packet_len[packets++] = to_write;
       avail -= to_write;
       to_write = stream_chunk_size(stream);
    }
@@ -863,7 +858,7 @@ static bool init_stream_nolock(maru_context *ctx,
 
    size_t buffer_size = desc->buffer_size;
    if (buffer_size == 0)
-      buffer_size = 4096;
+      buffer_size = 1024 * 32;
 
    size_t frame_size = (desc->sample_rate *
       desc->channels *
