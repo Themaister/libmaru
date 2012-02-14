@@ -125,8 +125,8 @@ struct maru_control_request
 
    uint8_t request_type;
    uint8_t request;
-   uint8_t value;
-   uint8_t index;
+   uint16_t value;
+   uint16_t index;
 
    struct
    {
