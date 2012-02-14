@@ -866,14 +866,21 @@ static bool init_stream_nolock(maru_context *ctx,
 
    // Need a sufficiently large buffer to operate somewhat correctly.
    // This works out to rougly 4ms.
-   if (buffer_size < 2 * frame_size)
+   if (buffer_size < 4 * frame_size)
       return false;
+
+   // Set fragment size.
+   size_t frag_size = desc->fragment_size;
+   if (!frag_size)
+      frag_size = buffer_size >> 2;
 
    // When POLLIN fires in thread, we want to be able
    // to send a full frame to libusb directly from the buffer.
    // Frame sizes might vary slighly over time (async isochronous),
    // so be safe here and trigger on twice the nominal size.
    size_t trigger_size = frame_size * 4;
+   if (frag_size > trigger_size)
+      trigger_size = frag_size;
 
    str->fifo = maru_fifo_new(buffer_size);
    if (!str->fifo)
@@ -886,11 +893,6 @@ static bool init_stream_nolock(maru_context *ctx,
       str->fifo = NULL;
       return false;
    }
-
-   // Set write fragment size.
-   size_t frag_size = desc->fragment_size;
-   if (!frag_size)
-      frag_size = buffer_size >> 2;
 
    if (maru_fifo_set_write_trigger(str->fifo,
             frag_size) < 0)
