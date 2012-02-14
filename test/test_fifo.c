@@ -6,8 +6,8 @@
 #include <poll.h>
 #include <stdio.h>
 
-#define CHUNK_SIZE 4
-#define BUFFER_SIZE 4096
+#define CHUNK_SIZE 2048 * 4
+#define BUFFER_SIZE (4096 * 16)
 
 static void *writer_thread(void *data)
 {
@@ -15,6 +15,8 @@ static void *writer_thread(void *data)
 
    char buf[CHUNK_SIZE];
    ssize_t rc;
+
+   maru_fifo_set_write_trigger(fifo, CHUNK_SIZE);
 
    size_t total = 0;
    while ((rc = read(0, buf, sizeof(buf))) > 0)
@@ -40,6 +42,8 @@ static void *reader_thread(void *data)
 {
    maru_fifo *fifo = data;
    char buf[CHUNK_SIZE];
+
+   maru_fifo_set_read_trigger(fifo, CHUNK_SIZE);
 
    size_t total = 0;
    for (;;)

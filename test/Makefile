@@ -1,8 +1,8 @@
 
 TARGETS = bin/test_fifo bin/test_enum
 
-CFLAGS += -O3 -g -pthread -std=gnu99 -Wall -I.. $(shell pkg-config libusb-1.0 --cflags)
-LDFLAGS += -g -pthread $(shell pkg-config libusb-1.0 --libs)
+CFLAGS += -O3 -pthread -std=gnu99 -Wall -I.. $(shell pkg-config libusb-1.0 --cflags)
+LDFLAGS += -pthread $(shell pkg-config libusb-1.0 --libs)
 
 all: $(TARGETS)
 

@@ -24,7 +24,7 @@ int main(void)
       assert(maru_create_context_from_vid_pid(&ctx, list[0].vendor_id,
                list[0].product_id) == LIBMARU_SUCCESS);
 
-      maru_error err = maru_stream_set_volume(ctx, LIBMARU_STREAM_MASTER, -30 * 256, 5000000);
+      maru_error err = maru_stream_set_volume(ctx, LIBMARU_STREAM_MASTER, -20 * 256, 5000000);
       if (err < 0)
          fprintf(stderr, "Error = %d\n", err);
 
@@ -48,16 +48,19 @@ int main(void)
       fprintf(stderr, "\tChannels: %u\n", desc[0].channels);
       fprintf(stderr, "\tBits: %u\n", desc[0].bits);
 
-      desc[0].buffer_size = 1024 * 16;
-      desc[0].fragment_size = 1024 * 4;
+      desc[0].buffer_size = 1024 * 64;
+      desc[0].fragment_size = 1024 * 16;
 
       assert(maru_stream_open(ctx, stream, desc) == LIBMARU_SUCCESS);
 
+#if 0
       size_t total_write = 0;
       bool toggle = false;
+#endif
+
       for (;;)
       {
-         char buf[1024 * 4];
+         char buf[1024 * 8];
          ssize_t ret = read(0, buf, sizeof(buf));
          if (ret <= 0)
             break;
@@ -68,6 +71,7 @@ int main(void)
             break;
          }
 
+#if 0
          total_write += ret;
          if (total_write > 100000)
          {
@@ -75,6 +79,7 @@ int main(void)
             maru_stream_set_volume(ctx, LIBMARU_STREAM_MASTER, toggle ? -20 * 256 : -10 * 256, 1000000);
             total_write -= 100000;
          }
+#endif
       }
 
       assert(maru_stream_close(ctx, stream) == LIBMARU_SUCCESS);

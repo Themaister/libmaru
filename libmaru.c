@@ -73,6 +73,9 @@ struct maru_context
    pthread_mutex_t lock;
    pthread_t thread;
    bool thread_dead;
+
+   size_t epoll_wait_cnt;
+   size_t libusb_call_cnt;
 };
 
 struct usb_uas_format_descriptor
@@ -397,6 +400,8 @@ static bool append_transfer(struct transfer_list *list, struct maru_transfer *tr
    return true;
 }
 
+#define LIBMARU_MAX_ENQUEUE_COUNT 32
+
 static struct maru_transfer *create_transfer(struct transfer_list *list, size_t required_buffer)
 {
    struct maru_transfer *trans = calloc(1, sizeof(*trans) + required_buffer);
@@ -404,7 +409,7 @@ static struct maru_transfer *create_transfer(struct transfer_list *list, size_t 
       return NULL;
 
    trans->embedded_data_capacity = required_buffer;
-   trans->trans = libusb_alloc_transfer(1);
+   trans->trans = libusb_alloc_transfer(LIBMARU_MAX_ENQUEUE_COUNT);
    if (!trans->trans)
       goto error;
 
@@ -473,7 +478,8 @@ static void transfer_feedback_cb(struct libusb_transfer *trans)
 }
 
 static void fill_transfer(maru_context *ctx,
-      struct maru_transfer *trans, const struct maru_fifo_locked_region *region)
+      struct maru_transfer *trans, const struct maru_fifo_locked_region *region,
+      const unsigned *packet_len, unsigned packets)
 {
    libusb_fill_iso_transfer(trans->trans,
          ctx->handle,
@@ -483,12 +489,13 @@ static void fill_transfer(maru_context *ctx,
          region->second ? trans->embedded_data : region->first,
 
          region->first_size + region->second_size,
-         1,
+         packets,
          transfer_stream_cb,
          trans,
          1000);
 
-   libusb_set_iso_packet_lengths(trans->trans, region->first_size + region->second_size);
+   for (unsigned i = 0; i < packets; i++)
+      trans->trans->iso_packet_desc[i].length = packet_len[i];
 
    if (region->second)
    {
@@ -500,7 +507,7 @@ static void fill_transfer(maru_context *ctx,
 }
 
 static bool enqueue_transfer(maru_context *ctx, struct maru_stream_internal *stream,
-      const struct maru_fifo_locked_region *region)
+      const struct maru_fifo_locked_region *region, const unsigned *packet_len, unsigned packets)
 {
    // If our region is split, we have to make a copy to get a contigous transfer.
    size_t required_buffer = region->second_size ? region->first_size + region->second_size : 0;
@@ -520,7 +527,7 @@ static bool enqueue_transfer(maru_context *ctx, struct maru_stream_internal *str
 
    transfer->stream = stream;
    transfer->active = true;
-   fill_transfer(ctx, transfer, region);
+   fill_transfer(ctx, transfer, region, packet_len, packets);
 
    if (libusb_submit_transfer(transfer->trans) < 0)
    {
@@ -603,25 +610,31 @@ static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream
    }
 
    size_t avail = maru_fifo_read_avail(stream->fifo);
-   size_t to_write = stream_chunk_size(stream);
 
-#define USB_MAX_ENQUEUE_COUNT 32
+   unsigned packet_len[LIBMARU_MAX_ENQUEUE_COUNT];
+   unsigned packets = 0;
+   size_t total_write = 0;
+
+   size_t to_write = stream_chunk_size(stream);
 
    // Don't enqueue too many buffers at a time or we may desync (async).
    // Ideally we should be able to enqueue everything in one go as one single transfer, to avoid redundant locking
    // when each individual transfer completes, but this simplifies code for now.
    // But this should do to keep polling frequency as low as possible.
-   for (unsigned count = 0; avail >= to_write && count < USB_MAX_ENQUEUE_COUNT; count++, avail -= to_write)
+   for (; avail >= to_write && packets < LIBMARU_MAX_ENQUEUE_COUNT; packets++)
    {
-      struct maru_fifo_locked_region region;
-      maru_fifo_read_lock(stream->fifo, to_write,
-            &region);
-
-      if (!enqueue_transfer(ctx, stream, &region))
-         fprintf(stderr, "Enqueue transfer failed!\n");
-
+      total_write += to_write;
+      packet_len[packets] = to_write;
+      avail -= to_write;
       to_write = stream_chunk_size(stream);
    }
+
+   struct maru_fifo_locked_region region;
+   maru_fifo_read_lock(stream->fifo, total_write,
+         &region);
+
+   if (!enqueue_transfer(ctx, stream, &region, packet_len, packets))
+      fprintf(stderr, "Enqueue transfer failed!\n");
 
    if (maru_fifo_read_notify_ack(stream->fifo) != LIBMARU_SUCCESS)
    {
@@ -779,6 +792,7 @@ static void *thread_entry(void *data)
       int num_events;
 
 poll_retry:
+      ctx->epoll_wait_cnt++;
       if ((num_events = epoll_wait(ctx->epfd, events, 16, -1)) < 0)
       {
          if (errno == EINTR)
@@ -805,11 +819,14 @@ poll_retry:
             libusb_event = true;
       }
 
-      if (libusb_event &&
-            libusb_handle_events_timeout(ctx->ctx, &(struct timeval) {0}) < 0)
+      if (libusb_event)
       {
-         fprintf(stderr, "libusb_handle_events_timeout() failed!\n");
-         alive = false;
+         ctx->libusb_call_cnt++;
+         if (libusb_handle_events_timeout(ctx->ctx, &(struct timeval) {0}) < 0)
+         {
+            fprintf(stderr, "libusb_handle_events_timeout() failed!\n");
+            alive = false;
+         }
       }
    }
 
@@ -854,14 +871,14 @@ static bool init_stream_nolock(maru_context *ctx,
 
    // Need a sufficiently large buffer to operate somewhat correctly.
    // This works out to rougly 4ms.
-   if (buffer_size < 4 * frame_size)
+   if (buffer_size < 2 * frame_size)
       return false;
 
    // When POLLIN fires in thread, we want to be able
    // to send a full frame to libusb directly from the buffer.
    // Frame sizes might vary slighly over time (async isochronous),
    // so be safe here and trigger on twice the nominal size.
-   size_t trigger_size = frame_size * 2;
+   size_t trigger_size = frame_size * 4;
 
    str->fifo = maru_fifo_new(buffer_size);
    if (!str->fifo)
@@ -1074,6 +1091,10 @@ void maru_destroy_context(maru_context *ctx)
 
    if (ctx->ctx)
       libusb_exit(ctx->ctx);
+
+   fprintf(stderr, "Performance count:\n");
+   fprintf(stderr, "epoll_wait() calls: %zu\n", ctx->epoll_wait_cnt);
+   fprintf(stderr, "libusb_handle_events() calls: %zu\n", ctx->libusb_call_cnt);
 
    free(ctx);
 }
