@@ -63,9 +63,11 @@ struct maru_context
    unsigned num_streams;
    unsigned control_interface;
    unsigned stream_interface;
+   unsigned stream_altsetting;
+
    int quit_fd;
    int notify_fd;
-   int volume_fd[2];
+   int request_fd[2];
    uint64_t volume_count;
 
    int epfd;
@@ -88,7 +90,7 @@ struct usb_uas_format_descriptor
    uint8_t nSubFrameSize;
    uint8_t nBitResolution;
    uint8_t bSamFreqType;
-   uint8_t tSamFreq[3]; // Hardcoded for one sample rate.
+   uint8_t tSamFreq[];
 } __attribute__((packed));
 
 #define USB_CLASS_AUDIO                1
@@ -97,48 +99,50 @@ struct usb_uas_format_descriptor
 
 #define USB_ENDPOINT_ISOCHRONOUS       0x01
 #define USB_ENDPOINT_ASYNC             0x04
+#define USB_ENDPOINT_ADAPTIVE          0x08
 
 #define USB_CLASS_DESCRIPTOR           0x20
 #define USB_INTERFACE_DESCRIPTOR_TYPE  0x04
 #define USB_FORMAT_DESCRIPTOR_SUBTYPE  0x02
 #define USB_FORMAT_TYPE_I              0x01
 #define USB_FREQ_TYPE_DIRECT           0x01
+#define USB_FREQ_TYPE_DISCRETE         0x02
 
 #define USB_AUDIO_FEEDBACK_SIZE        3
+#define USB_MAX_CONTROL_SIZE           64
 
 #define USB_REQUEST_UAC_SET_CUR        0x01
 #define USB_REQUEST_UAC_GET_CUR        0x81
 #define USB_REQUEST_UAC_GET_MIN        0x82
 #define USB_REQUEST_UAC_GET_MAX        0x83
+#define UAS_FREQ_CONTROL               0x01
+#define UAS_PITCH_CONTROL              0x02
 #define USB_REQUEST_DIR_MASK           0x80
 
-struct maru_volume_request
+struct maru_control_request
 {
    uint64_t count;
+
+   uint8_t request_type;
    uint8_t request;
-   maru_volume_t volume;
+   uint8_t value;
+   uint8_t index;
+
+   struct
+   {
+      uint8_t setup[sizeof(struct libusb_control_setup)];
+      uint8_t data[USB_MAX_CONTROL_SIZE];
+   } __attribute__((packed)) data;
+
+   size_t size;
+
    maru_error error;
    int reply_fd;
 };
 
-struct maru_volume_request_buf
-{
-   struct maru_volume_request req;
-   uint8_t buffer[sizeof(struct libusb_control_setup) + sizeof(int16_t)];
-};
-
-static inline bool interface_is_class(const struct libusb_interface_descriptor *iface, unsigned class)
-{
-   return iface->bInterfaceClass == class;
-}
-
-static inline bool interface_is_subclass(const struct libusb_interface_descriptor *iface, unsigned subclass)
-{
-   return iface->bInterfaceSubClass == subclass;
-}
-
 static int find_interface_class_index(const struct libusb_config_descriptor *conf,
-      unsigned class, unsigned subclass)
+      unsigned class, unsigned subclass,
+      unsigned min_eps, int *altsetting)
 {
    for (unsigned i = 0; i < conf->bNumInterfaces; i++)
    {
@@ -146,10 +150,15 @@ static int find_interface_class_index(const struct libusb_config_descriptor *con
       {
          const struct libusb_interface_descriptor *desc =
             &conf->interface[i].altsetting[j];
-         if (interface_is_class(desc, USB_CLASS_AUDIO) &&
-               interface_is_subclass(desc, USB_SUBCLASS_AUDIO_STREAMING))
+
+         if (desc->bInterfaceClass == class &&
+               desc->bInterfaceSubClass == subclass &&
+               desc->bNumEndpoints >= min_eps)
          {
-            return i; // Altsettings are ignored for now.
+            if (altsetting)
+               *altsetting = j;
+
+            return i;
          }
       }
    }
@@ -157,11 +166,47 @@ static int find_interface_class_index(const struct libusb_config_descriptor *con
    return -1;
 }
 
+static bool parse_audio_format(const uint8_t *data, size_t size, struct maru_stream_desc *desc);
+
+static bool format_has_num_channels(const struct libusb_interface_descriptor *desc,
+      unsigned channels)
+{
+   struct maru_stream_desc format_desc;
+
+   return parse_audio_format(desc->extra, desc->extra_length, &format_desc) &&
+         format_desc.channels == channels;
+}
+
+static int find_stream_interface_alt(const struct libusb_config_descriptor *conf,
+      unsigned channels, int *altsetting)
+{
+   for (unsigned i = 0; i < conf->bNumInterfaces; i++)
+   {
+      for (int j = 0; j < conf->interface[i].num_altsetting; j++)
+      {
+         const struct libusb_interface_descriptor *desc =
+            &conf->interface[i].altsetting[j];
+
+         if (desc->bInterfaceClass == USB_CLASS_AUDIO &&
+               desc->bInterfaceSubClass == USB_SUBCLASS_AUDIO_STREAMING &&
+               desc->bNumEndpoints >= 1 &&
+               format_has_num_channels(desc, channels))
+         {
+            if (altsetting)
+               *altsetting = j;
+
+            return i;
+         }
+      }
+   }
+
+   return -1;
+}
 
 static bool conf_is_audio_class(const struct libusb_config_descriptor *conf)
 {
    return find_interface_class_index(conf, USB_CLASS_AUDIO,
-            USB_SUBCLASS_AUDIO_STREAMING) >= 0;
+         USB_SUBCLASS_AUDIO_STREAMING, 1, NULL) >= 0;
 }
 
 static bool device_is_audio_class(libusb_device *dev)
@@ -324,7 +369,7 @@ static bool poll_list_init(maru_context *ctx)
       goto end;
    }
 
-   if (!poll_list_add(ctx->epfd, ctx->volume_fd[0], POLLIN))
+   if (!poll_list_add(ctx->epfd, ctx->request_fd[0], POLLIN))
    {
       ret = false;
       goto end;
@@ -439,8 +484,16 @@ static void transfer_stream_cb(struct libusb_transfer *trans)
    if (cb)
       cb(userdata);
 
+   for (int i = 0; i < trans->num_iso_packets; i++)
+   {
+      if (trans->iso_packet_desc[i].length != trans->iso_packet_desc[i].actual_length)
+         fprintf(stderr, "Actual length differs from sent length! (Actual: %d, Requested: %d)\n",
+               trans->iso_packet_desc[i].actual_length,
+               trans->iso_packet_desc[i].length);
+   }
+
    if (trans->status != LIBUSB_TRANSFER_COMPLETED)
-      fprintf(stderr, "Stream callback: Failed transfer ...\n");
+      fprintf(stderr, "Stream callback: Failed transfer ... (status: %d)\n", trans->status);
 }
 
 static void transfer_feedback_cb(struct libusb_transfer *trans)
@@ -584,17 +637,22 @@ error:
 
 static size_t stream_chunk_size(struct maru_stream_internal *stream)
 {
+   size_t new_fraction = stream->transfer_speed_fraction + (stream->transfer_speed & 0xffff);
+
+   size_t to_write = new_fraction >> 16;
+   to_write *= stream->transfer_speed_mult;
+
+   return to_write;
+}
+
+static void stream_chunk_size_finalize(struct maru_stream_internal *stream)
+{
    // Calculate fractional speeds (async isochronous).
    stream->transfer_speed_fraction += stream->transfer_speed & 0xffff;
-
-   size_t to_write = stream->transfer_speed_fraction >> 16;
-   to_write *= stream->transfer_speed_mult;
 
    // Wrap-around.
    stream->transfer_speed_fraction = (UINT32_C(0xffff0000) & stream->transfer_speed)
       | (stream->transfer_speed_fraction & 0xffff);
-
-   return to_write;
 }
 
 static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream)
@@ -615,12 +673,14 @@ static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream
    unsigned packets = 0;
    size_t total_write = 0;
 
+
    size_t to_write = stream_chunk_size(stream);
    while (avail >= to_write && packets < LIBMARU_MAX_ENQUEUE_COUNT)
    {
       total_write += to_write;
       packet_len[packets++] = to_write;
       avail -= to_write;
+      stream_chunk_size_finalize(stream);
       to_write = stream_chunk_size(stream);
    }
 
@@ -691,40 +751,42 @@ static void kill_write_notifications(maru_context *ctx)
 
 static void transfer_control_cb(struct libusb_transfer *trans)
 {
-   struct maru_volume_request_buf *buf = trans->user_data;
-
-   if (buf->req.request & USB_REQUEST_DIR_MASK)
-   {
-      uint16_t val;
-      memcpy(&val, libusb_control_transfer_get_data(trans), sizeof(val));
-      buf->req.volume = (maru_volume_t)libusb_le16_to_cpu(val);
-   }
+   struct maru_control_request *buf = trans->user_data;
 
    switch (trans->status)
    {
       case LIBUSB_TRANSFER_COMPLETED:
-         buf->req.error = LIBMARU_SUCCESS;
+         buf->error = LIBMARU_SUCCESS;
          break;
          
       case LIBUSB_TRANSFER_TIMED_OUT:
-         buf->req.error = LIBMARU_ERROR_TIMEOUT;
+         buf->error = LIBMARU_ERROR_TIMEOUT;
          break;
 
+      case LIBUSB_TRANSFER_STALL:
+      {
+         int ret;
+         buf->error = LIBMARU_ERROR_INVALID;
+         if ((ret = libusb_clear_halt(trans->dev_handle, trans->endpoint)) < 0)
+            fprintf(stderr, "Failed to clear stall (error: %d)!\n", ret);
+         break;
+      }
+
       default:
-         buf->req.error = LIBMARU_ERROR_IO;
+         buf->error = LIBMARU_ERROR_IO;
          break;
    }
 
-   write(buf->req.reply_fd, &buf->req, sizeof(buf->req));
+   write(buf->reply_fd, buf, sizeof(*buf));
 
    free(buf);
    libusb_free_transfer(trans);
 }
 
-static void handle_volume(maru_context *ctx,
+static void handle_request(maru_context *ctx,
       int fd)
 {
-   struct maru_volume_request req;
+   struct maru_control_request req;
    if (read(fd, &req, sizeof(req)) != (ssize_t)sizeof(req))
       return;
 
@@ -736,7 +798,7 @@ static void handle_volume(maru_context *ctx,
       return;
    }
 
-   struct maru_volume_request_buf *buf = calloc(1, sizeof(*buf));
+   struct maru_control_request *buf = calloc(1, sizeof(*buf));
    if (!buf)
    {
       req.error = LIBMARU_ERROR_MEMORY;
@@ -744,26 +806,21 @@ static void handle_volume(maru_context *ctx,
       return;
    }
 
-   libusb_fill_control_setup(buf->buffer,
-         LIBUSB_REQUEST_TYPE_CLASS | (req.request & USB_REQUEST_DIR_MASK),
+   libusb_fill_control_setup(buf->data.setup,
+         req.request_type | (req.request & USB_REQUEST_DIR_MASK),
          req.request,
-         2 << 8, // Volume only for now.
-         0,
-         sizeof(int16_t));
+         req.value,
+         req.index,
+         req.size);
 
-   buf->req = req;
+   *buf = req;
+
    libusb_fill_control_transfer(trans,
          ctx->handle,
-         buf->buffer,
+         buf->data.setup,
          transfer_control_cb,
          buf,
-         5000);
-
-   if (!(req.request & USB_REQUEST_DIR_MASK))
-   {
-      uint16_t vol = libusb_cpu_to_le16(req.volume);
-      memcpy(libusb_control_transfer_get_data(trans), &vol, sizeof(vol));
-   }
+         1000);
 
    if (libusb_submit_transfer(trans) < 0)
    {
@@ -808,8 +865,8 @@ poll_retry:
             handle_stream(ctx, stream);
          else if (fd == ctx->quit_fd)
             alive = false;
-         else if (fd == ctx->volume_fd[0])
-            handle_volume(ctx, fd);
+         else if (fd == ctx->request_fd[0])
+            handle_request(ctx, fd);
          else
             libusb_event = true;
       }
@@ -853,7 +910,7 @@ static bool init_stream_nolock(maru_context *ctx,
 {
    struct maru_stream_internal *str = &ctx->streams[stream];
 
-   if (!enqueue_feedback_transfer(ctx, str))
+   if (str->feedback_ep && !enqueue_feedback_transfer(ctx, str))
       return false;
 
    size_t buffer_size = desc->buffer_size;
@@ -909,6 +966,7 @@ static bool init_stream_nolock(maru_context *ctx,
 
    str->transfer_speed_fraction = desc->sample_rate;
    str->transfer_speed_fraction <<= 16;
+
    str->transfer_speed_fraction /= 1000;
 
    str->bps = desc->sample_rate * desc->channels * desc->bits / 8;
@@ -938,19 +996,28 @@ static void deinit_stream(maru_context *ctx, maru_stream stream)
    ctx_unlock(ctx);
 }
 
+static int perform_pitch_request(maru_context *ctx,
+      unsigned ep,
+      maru_usec timeout);
+
 static bool enumerate_endpoints(maru_context *ctx, const struct libusb_config_descriptor *cdesc)
 {
    const struct libusb_interface_descriptor *desc =
-      &cdesc->interface[ctx->stream_interface].altsetting[0]; // Hardcoded for now.
+      &cdesc->interface[ctx->stream_interface].altsetting[ctx->stream_altsetting];
 
-   // Just assume everything uses async feedback.
    for (unsigned i = 0; i < desc->bNumEndpoints; i++)
    {
       const struct libusb_endpoint_descriptor *endp = &desc->endpoint[i];
 
-      if (endp->bmAttributes == (USB_ENDPOINT_ISOCHRONOUS | USB_ENDPOINT_ASYNC) &&
-            !add_stream(ctx, endp->bEndpointAddress, endp->bSynchAddress))
-         return false;
+      if (endp->bEndpointAddress < 0x80 &&
+            (endp->bmAttributes & USB_ENDPOINT_ISOCHRONOUS))
+      {
+         if (!add_stream(ctx, endp->bEndpointAddress, endp->bSynchAddress))
+            return false;
+
+         if (endp->bmAttributes & USB_ENDPOINT_ADAPTIVE)
+            perform_pitch_request(ctx, endp->bEndpointAddress, 100000);
+      }
    }
 
    return true;
@@ -961,15 +1028,23 @@ static bool enumerate_streams(maru_context *ctx)
    struct libusb_config_descriptor *conf = ctx->conf;
 
    int ctrl_index = find_interface_class_index(conf,
-         USB_CLASS_AUDIO, USB_SUBCLASS_AUDIO_CONTROL);
-   int stream_index = find_interface_class_index(conf,
-         USB_CLASS_AUDIO, USB_SUBCLASS_AUDIO_STREAMING);
+         USB_CLASS_AUDIO, USB_SUBCLASS_AUDIO_CONTROL, 0, NULL);
+
+   int altsetting = 0;
+
+   // Only use interface that has 2 channels for now.
+   // TODO: Expose way to set different number of channels.
+   int stream_index = find_stream_interface_alt(conf,
+         2, &altsetting);
 
    if (ctrl_index < 0 || stream_index < 0)
       return false;
 
    ctx->control_interface = ctrl_index;
    ctx->stream_interface = stream_index;
+   ctx->stream_altsetting = altsetting;
+
+   fprintf(stderr, "CTRL: %d, STREAM: %d(%d)\n", ctrl_index, stream_index, altsetting);
 
    int ifaces[2] = { ctrl_index, stream_index };
    for (unsigned i = 0; i < 2; i++)
@@ -986,6 +1061,9 @@ static bool enumerate_streams(maru_context *ctx)
          return false;
    }
 
+   if (libusb_set_interface_alt_setting(ctx->handle, stream_index, altsetting) < 0)
+      return false;
+
    if (!enumerate_endpoints(ctx, conf))
       return false;
 
@@ -1001,14 +1079,14 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
 
    context->quit_fd = eventfd(0, 0);
    context->epfd = epoll_create(16);
-   if (socketpair(AF_UNIX, SOCK_STREAM, 0, context->volume_fd) < 0)
+   if (socketpair(AF_UNIX, SOCK_STREAM, 0, context->request_fd) < 0)
       goto error;
 
-   if (fcntl(context->volume_fd[0], F_SETFL,
-            fcntl(context->volume_fd[0], F_GETFL) | O_NONBLOCK) < 0)
+   if (fcntl(context->request_fd[0], F_SETFL,
+            fcntl(context->request_fd[0], F_GETFL) | O_NONBLOCK) < 0)
       goto error;
-   if (fcntl(context->volume_fd[1], F_SETFL,
-            fcntl(context->volume_fd[1], F_GETFL) | O_NONBLOCK) < 0)
+   if (fcntl(context->request_fd[1], F_SETFL,
+            fcntl(context->request_fd[1], F_GETFL) | O_NONBLOCK) < 0)
       goto error;
 
    if (context->quit_fd < 0 ||
@@ -1067,10 +1145,10 @@ void maru_destroy_context(maru_context *ctx)
       close(ctx->quit_fd);
    }
 
-   if (ctx->volume_fd[0] >= 0)
-      close(ctx->volume_fd[0]);
-   if (ctx->volume_fd[1] >= 0)
-      close(ctx->volume_fd[1]);
+   if (ctx->request_fd[0] >= 0)
+      close(ctx->request_fd[0]);
+   if (ctx->request_fd[1] >= 0)
+      close(ctx->request_fd[1]);
 
    poll_list_deinit(ctx);
 
@@ -1084,7 +1162,14 @@ void maru_destroy_context(maru_context *ctx)
       libusb_free_config_descriptor(ctx->conf);
 
    if (ctx->handle)
+   {
+      libusb_release_interface(ctx->handle, ctx->control_interface);
+      libusb_release_interface(ctx->handle, ctx->stream_interface);
+      libusb_attach_kernel_driver(ctx->handle, ctx->control_interface);
+      libusb_attach_kernel_driver(ctx->handle, ctx->stream_interface);
+
       libusb_close(ctx->handle);
+   }
 
    if (ctx->ctx)
       libusb_exit(ctx->ctx);
@@ -1109,19 +1194,21 @@ static bool parse_audio_format(const uint8_t *data, size_t length,
    {
       header = (const struct usb_uas_format_descriptor*)&data[i];
 
-      if (header->bLength != sizeof(*header))
+      if (header->bLength < sizeof(*header))
          continue;
 
       if (header->bDescriptorType != (USB_CLASS_DESCRIPTOR | USB_INTERFACE_DESCRIPTOR_TYPE) ||
             header->bDescriptorSubtype != USB_FORMAT_DESCRIPTOR_SUBTYPE ||
             header->bFormatType != USB_FORMAT_TYPE_I ||
-            header->bSamFreqType != USB_FREQ_TYPE_DIRECT)
+            ((header->bSamFreqType != USB_FREQ_TYPE_DIRECT) && (header->bSamFreqType != USB_FREQ_TYPE_DISCRETE)))
          continue;
 
+      unsigned rate_start = header->bLength - sizeof(*header) - 3;
+      // Use last format in list (somewhat hacky, will do for now ...)
       desc->sample_rate =
-         (header->tSamFreq[0] <<  0) |
-         (header->tSamFreq[1] <<  8) |
-         (header->tSamFreq[2] << 16);
+         (header->tSamFreq[rate_start + 0] <<  0) |
+         (header->tSamFreq[rate_start + 1] <<  8) |
+         (header->tSamFreq[rate_start + 2] << 16);
 
       desc->channels = header->bNrChannels;
       desc->bits = header->nBitResolution;
@@ -1137,7 +1224,7 @@ static bool fill_audio_format(maru_context *ctx, struct maru_stream_desc *desc)
    // Format descriptors are not standard (class specific),
    // so we poke in the extra descriptors.
 
-   const struct libusb_interface_descriptor *iface = &ctx->conf->interface[ctx->stream_interface].altsetting[0];
+   const struct libusb_interface_descriptor *iface = &ctx->conf->interface[ctx->stream_interface].altsetting[ctx->stream_altsetting];
    return parse_audio_format(iface->extra, iface->extra_length, desc);
 }
 
@@ -1302,25 +1389,38 @@ size_t maru_stream_write_avail(maru_context *ctx, maru_stream stream)
 }
 
 static maru_error perform_request(maru_context *ctx,
-      maru_volume_t *vol, uint8_t request, maru_usec timeout)
+      uint8_t request_type, uint8_t request, uint16_t value, uint16_t index,
+      void *data, size_t size,
+      maru_usec timeout)
 {
-   const struct maru_volume_request req = {
-      .count = ctx->volume_count++,
-      .request = request,
-      .volume = *vol,
-      .reply_fd = ctx->volume_fd[0],
+   struct maru_control_request req = {
+      .count        = ctx->volume_count++,
+
+      .request_type = request_type,
+      .request      = request,
+      .value        = value,
+      .index        = index,
+
+      .size         = size,
+
+      .reply_fd     = ctx->request_fd[0],
    };
 
-   if (write(ctx->volume_fd[1], &req, sizeof(req)) != (ssize_t)sizeof(req))
+   if (size > sizeof(req.data.data))
+      return LIBMARU_ERROR_INVALID;
+
+   memcpy(req.data.data, data, size);
+
+   if (write(ctx->request_fd[1], &req, sizeof(req)) != (ssize_t)sizeof(req))
       return LIBMARU_ERROR_IO;
 
-   struct maru_volume_request ret_req;
+   struct maru_control_request ret_req;
 
    do
    {
       // Wait for reply from thread.
       struct pollfd fds = {
-         .fd = ctx->volume_fd[1],
+         .fd = ctx->request_fd[1],
          .events = POLLIN,
       };
 
@@ -1339,13 +1439,34 @@ poll_retry:
       if (!(fds.revents & POLLIN))
          return LIBMARU_ERROR_TIMEOUT;
 
-      if (read(ctx->volume_fd[1], &ret_req, sizeof(ret_req)) != (ssize_t)sizeof(ret_req))
+      if (read(ctx->request_fd[1], &ret_req, sizeof(ret_req)) != (ssize_t)sizeof(ret_req))
          return LIBMARU_ERROR_IO;
 
    } while (ret_req.count != req.count);
 
-   *vol = ret_req.volume;
+   memcpy(data, ret_req.data.data, size);
    return ret_req.error;
+}
+
+static int perform_pitch_request(maru_context *ctx,
+      unsigned ep,
+      maru_usec timeout)
+{
+   return libusb_control_transfer(ctx->handle,
+         LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_ENDPOINT,
+         USB_REQUEST_UAC_SET_CUR,
+         UAS_PITCH_CONTROL << 8,
+         ep,
+         (uint8_t[]) {1}, sizeof(uint8_t), timeout < 0 ? -1 : timeout / 1000);
+}
+
+static maru_error perform_volume_request(maru_context *ctx,
+      maru_volume_t *vol, uint8_t request, maru_usec timeout)
+{
+   return perform_request(ctx,
+         LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_DEVICE, request,
+         2 << 8, 0,
+         vol, sizeof(*vol), timeout);
 }
 
 maru_error maru_stream_get_volume(maru_context *ctx,
@@ -1359,7 +1480,7 @@ maru_error maru_stream_get_volume(maru_context *ctx,
 
    if (current)
    {
-      maru_error err = perform_request(ctx, current,
+      maru_error err = perform_volume_request(ctx, current,
             USB_REQUEST_UAC_GET_CUR, timeout);
 
       if (err != LIBMARU_SUCCESS)
@@ -1368,7 +1489,7 @@ maru_error maru_stream_get_volume(maru_context *ctx,
 
    if (min)
    {
-      maru_error err = perform_request(ctx, min,
+      maru_error err = perform_volume_request(ctx, min,
             USB_REQUEST_UAC_GET_MIN, timeout);
 
       if (err != LIBMARU_SUCCESS)
@@ -1377,7 +1498,7 @@ maru_error maru_stream_get_volume(maru_context *ctx,
 
    if (max)
    {
-      maru_error err = perform_request(ctx, max,
+      maru_error err = perform_volume_request(ctx, max,
             USB_REQUEST_UAC_GET_MAX, timeout);
 
       if (err != LIBMARU_SUCCESS)
@@ -1396,7 +1517,7 @@ maru_error maru_stream_set_volume(maru_context *ctx,
    if (stream != LIBMARU_STREAM_MASTER)
       return LIBMARU_ERROR_INVALID;
 
-   return perform_request(ctx, &volume, USB_REQUEST_UAC_SET_CUR, timeout);
+   return perform_volume_request(ctx, &volume, USB_REQUEST_UAC_SET_CUR, timeout);
 }
 
 maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream)
