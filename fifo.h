@@ -15,10 +15,6 @@ extern "C" {
 typedef struct maru_fifo maru_fifo;
 
 /** \ingroup buffer
- * Type of a native pollable file descriptor. */
-typedef int maru_fd;
-
-/** \ingroup buffer
  * \brief Creates a new fifo.
  *
  * \param size Size of buffer.
@@ -43,7 +39,7 @@ void maru_fifo_free(maru_fifo *fifo);
  *
  * maru_fifo supports a notification handle that can be polled using
  * poll(), select() or similar calls to multiplex different buffers or other file descriptors.
- * The type of the handle may vary with the operating system used. \ref maru_fd.
+ * The type of the handle may vary with the operating system used. \ref int.
  *
  * On Unix, the file descriptor can be polled with POLLIN or similar.
  * After an event has been read, and the user has performed the needed operations on the buffer,
@@ -55,7 +51,7 @@ void maru_fifo_free(maru_fifo *fifo);
  * \param fifo The fifo
  * \returns Platform-specific pollable handle.
  */
-maru_fd maru_fifo_write_notify_fd(maru_fifo *fifo);
+int maru_fifo_write_notify_fd(maru_fifo *fifo);
 
 /** \ingroup buffer
  * \brief Acknowledge a notification.
@@ -89,7 +85,7 @@ size_t maru_fifo_buffered_size(maru_fifo *fifo);
  * \param fifo The fifo
  * \returns Platform-specific pollable handle.
  */
-maru_fd maru_fifo_read_notify_fd(maru_fifo *fifo);
+int maru_fifo_read_notify_fd(maru_fifo *fifo);
 
 /** \ingroup buffer
  * \brief Set the least amount of bytes that needs to be writable for notification to occur.

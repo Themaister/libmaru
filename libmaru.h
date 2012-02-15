@@ -70,7 +70,7 @@ typedef enum
 struct maru_stream_desc
 {
    /** Sample rate of PCM audio.
-    * If 0, \ref sample_rate_min and \ref sample_rate_max are set by \c maru_get_stream_desc().
+    * If 0, \ref sample_rate_min and \ref sample_rate_max are set by maru_get_stream_desc().
     * Application must fill in sample_rate in that case. */
    unsigned sample_rate;
    /** Number of PCM channels. */
@@ -80,7 +80,7 @@ struct maru_stream_desc
 
    /** Desired buffer size in bytes. This value might not be honored exactly.
     * It is not set by maru_get_stream_desc().
-    * If a buffer size of 0 is passed to maru_open_stream(),
+    * If a buffer size of 0 is passed to maru_stream_open(),
     * it will attempt to find some appropriate buffer size. */
    size_t buffer_size;
 
@@ -98,16 +98,16 @@ struct maru_stream_desc
     * If you plan to write a constant amount of data every blocking write,
     * that size should be used as fragment_size to optimize a blocking write to a single poll.
     *
-    * If a fragment size of 0 is passed to maru_open_stream(),
+    * If a fragment size of 0 is passed to maru_stream_open(),
     * it will attempt to find some appropriate value from the buffer size.
     */
    size_t fragment_size;
 
-   /** Might be set by \c maru_get_stream_desc() if the endpoint supports continous sample rates.
+   /** Might be set by maru_get_stream_desc() if the endpoint supports continous sample rates.
     * \ref sample_rate will not be set to an appropriate value if these fields are set. */
    unsigned sample_rate_min;
 
-   /** Might be set by \c maru_get_stream_desc() if the endpoint supports continous sample rates.
+   /** Might be set by maru_get_stream_desc() if the endpoint supports continous sample rates.
     * \ref sample_rate will not be set to an appropriate value if these fields are set. */
    unsigned sample_rate_max;
 };
@@ -125,7 +125,7 @@ const char *maru_error_string(maru_error error);
  *
  * \param list Pointer to a list that will be allocated.
  * If this function returns successfully and num_devices is larger than 0,
- * caller must call \c free() on the list when not needed anymore.
+ * caller must call free() on the list when not needed anymore.
  *
  * \param num_devices Receives number of devices found.
  *
@@ -147,12 +147,9 @@ maru_error maru_list_audio_devices(struct maru_audio_device **list, unsigned *nu
  * \param desc Optional stream description.
  * If not NULL, libmaru will attempt to claim the audio interface that has
  * at least one stream description which matches the one given in desc.
- *
  * This is to deal with cases where a USB device might be
  * configured in different ways, i.e. 2ch vs. 6ch, etc.
- * 
  * The fields sample_rate, channels and bits must all match for the interface to be claimed. If a field is set to 0, it will match everything.
- *
  * If desc is NULL, the first audio interface will be claimed, and available stream formats must be queried with maru_get_stream_desc().
  *
  * \returns Error code \ref maru_error
@@ -163,6 +160,9 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
 
 /** \ingroup lib
  * \brief Destroy previously allocated context.
+ *
+ * This call will attempt to restore control of the device to the kernel if possible.
+ * It is undefined to call this function while other libmaru calls are being called.
  *
  * \param ctx libmaru context.
  */
@@ -182,7 +182,7 @@ int maru_get_num_streams(maru_context *ctx);
  *
  * \param ctx libmaru context
  * \param stream Stream index. Possible indices are in the range of
- * [0, \c maru_get_num_streams() - 1] inclusive.
+ * [0, maru_get_num_streams() - 1] inclusive.
  *
  * \returns 1 if stream can be used, 0 if it is already being used, negative if error \ref maru_error occured.
  */
@@ -213,7 +213,7 @@ int maru_find_available_stream(maru_context *ctx);
  * \param ctx libmaru context
  * \param stream Stream index. Must not be open.
  * \param desc Pointer to list of stream descriptor.
- * If num_desc is larger than 0, caller must call \c free() on returned desc.
+ * If num_desc is larger than 0, caller must call free() on returned desc.
  * \param num_desc Number of descriptors found.
  * \returns Error code \ref maru_error
  */
@@ -223,9 +223,11 @@ maru_error maru_get_stream_desc(maru_context *ctx, maru_stream stream,
 /** \ingroup stream
  * \brief Opens an available stream, and readies it for writing.
  *
+ * The stream opened by this call cannot be called to by different threads at the same time.
+ *
  * \param ctx libmaru context
  * \param stream Stream index to use. Must be an available stream.
- * \ref maru_is_stream_available \ref maru_find_available_stream
+ * \ref maru_is_stream_available maru_find_available_stream
  * \param desc
  *
  * \returns Error code \ref maru_error
@@ -234,6 +236,8 @@ maru_error maru_stream_open(maru_context *ctx, maru_stream stream, const struct 
 
 /** \ingroup stream
  * \brief Closes an opened stream.
+ *
+ * This function cannot be called if a maru_stream_write() call to the same stream is executing.
  *
  * \param ctx libmaru context
  * \param stream Stream index
@@ -260,10 +264,29 @@ typedef void (*maru_notification_cb)(void *userdata);
  * \param data Data to write
  * \param size Size to write
  *
- * \returns Bytes written. If returned amount is lower than size, an error occured.
+ * \returns Bytes written.
+ * If returned amount is lower than size, an error occured, and return value reflect number of bytes written successfully.
  */
 size_t maru_stream_write(maru_context *ctx, maru_stream stream, 
       const void *data, size_t size);
+
+/** \ingroup stream
+ * \brief Obtain notification descriptor for write stream.
+ *
+ * Obtains a pollable file descriptor for a stream.
+ * Note that the descriptor is a notification descriptor. POLLIN must be checked for, and not POLLOUT as expected.
+ * A POLLIN can also mean an error has occured, so return values of maru_stream_write() must be checked.
+ * The notification descriptor is only valid until maru_stream_close() on the given stream is called.
+ *
+ * For a pollable non-blocking operation, maru_stream_notification_fd() should be used, along with maru_stream_write_avail(), and
+ * finally maru_stream_write().
+ *
+ * \param ctx libmaru context
+ * \param stream Stream index
+ *
+ * \returns Pollable file descriptor or \ref maru_error if error.
+ */
+int maru_stream_notification_fd(maru_context *ctx, maru_stream stream);
 
 /** \ingroup stream
  * \brief Checks how much data can be written without blocking.
@@ -328,7 +351,7 @@ typedef int16_t maru_volume;
  * \brief Gets available volume range for stream.
  *
  * This operation is blocking, as requests have to be asynchronously
- * issues to the USB subsystem.
+ * issued to the USB subsystem.
  * Considerations must be made if this function is to be used in
  * a GUI or similar where blocking operations are bad.
  * A control request like this can usually be completed in the order of

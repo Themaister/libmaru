@@ -42,10 +42,10 @@ struct maru_fifo
    size_t write_lock_end;
 
    /** Notification fd for writer side. Uses Linux-specific eventfd. */
-   maru_fd write_fd;
+   int write_fd;
 
    /** Notification pipes for reader side. Uses Linux-specific eventfd. */
-   maru_fd read_fd;
+   int read_fd;
 
    /** Trigger for how many bytes must be available to issue a notification. */
    size_t read_trigger;
@@ -148,12 +148,12 @@ error:
    return NULL;
 }
 
-maru_fd maru_fifo_write_notify_fd(maru_fifo *fifo)
+int maru_fifo_write_notify_fd(maru_fifo *fifo)
 {
    return fifo->write_fd;
 }
 
-maru_fd maru_fifo_read_notify_fd(maru_fifo *fifo)
+int maru_fifo_read_notify_fd(maru_fifo *fifo)
 {
    return fifo->read_fd;
 }
@@ -356,7 +356,7 @@ size_t maru_fifo_blocking_write(maru_fifo *fifo,
    const uint8_t *data = data_;
    size_t written = 0;
 
-   maru_fd fd = maru_fifo_write_notify_fd(fifo);
+   int fd = maru_fifo_write_notify_fd(fifo);
 
    while (written < size)
    {
@@ -397,7 +397,7 @@ size_t maru_fifo_blocking_read(maru_fifo *fifo,
    uint8_t *data = data_;
    size_t has_read = 0;
 
-   maru_fd fd = maru_fifo_read_notify_fd(fifo);
+   int fd = maru_fifo_read_notify_fd(fifo);
 
    while (has_read < size)
    {

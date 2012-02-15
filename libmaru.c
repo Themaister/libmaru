@@ -1407,6 +1407,18 @@ size_t maru_stream_write(maru_context *ctx, maru_stream stream,
    return maru_fifo_blocking_write(fifo, data, size);
 }
 
+int maru_stream_notification_fd(maru_context *ctx,
+      maru_stream stream)
+{
+   if (stream >= ctx->num_streams)
+      return LIBMARU_ERROR_INVALID;
+
+   if (!ctx->streams[stream].fifo)
+      return LIBMARU_ERROR_INVALID;
+
+   return maru_fifo_write_notify_fd(ctx->streams[stream].fifo);
+}
+
 size_t maru_stream_write_avail(maru_context *ctx, maru_stream stream)
 {
    if (stream >= ctx->num_streams)
