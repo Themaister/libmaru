@@ -1492,7 +1492,7 @@ static int perform_pitch_request(maru_context *ctx,
 }
 
 static maru_error perform_volume_request(maru_context *ctx,
-      maru_volume_t *vol, uint8_t request, maru_usec timeout)
+      maru_volume *vol, uint8_t request, maru_usec timeout)
 {
    uint16_t swapped = libusb_cpu_to_le16(*vol);
 
@@ -1508,7 +1508,7 @@ static maru_error perform_volume_request(maru_context *ctx,
 
 maru_error maru_stream_get_volume(maru_context *ctx,
       maru_stream stream,
-      maru_volume_t *current, maru_volume_t *min, maru_volume_t *max,
+      maru_volume *current, maru_volume *min, maru_volume *max,
       maru_usec timeout)
 {
    // Only support master channel volume for now.
@@ -1547,7 +1547,7 @@ maru_error maru_stream_get_volume(maru_context *ctx,
 
 maru_error maru_stream_set_volume(maru_context *ctx,
       maru_stream stream,
-      maru_volume_t volume,
+      maru_volume volume,
       maru_usec timeout)
 {
    // Only support master channel volume for now.

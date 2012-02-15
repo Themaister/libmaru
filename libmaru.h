@@ -313,7 +313,7 @@ maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream);
  * \brief Typedef for a volume value. It is encoded in dB fixed point
  * where the actual value is (val) / 256.0. The number is signed and matches
  * the USB audio specification. */
-typedef int16_t maru_volume_t;
+typedef int16_t maru_volume;
 
 /**
  * \brief Pseudo-stream that represents the final output stream (after mixing).
@@ -322,7 +322,7 @@ typedef int16_t maru_volume_t;
 
 /**
  * \brief Pseudo-volume representing mute */
-#define LIBMARU_VOLUME_MUTE ((maru_volume_t)-0x8000)
+#define LIBMARU_VOLUME_MUTE ((maru_volume)-0x8000)
 
 /** \ingroup stream
  * \brief Gets available volume range for stream.
@@ -353,7 +353,7 @@ typedef int16_t maru_volume_t;
  */
 maru_error maru_stream_get_volume(maru_context *ctx,
       maru_stream stream,
-      maru_volume_t *current, maru_volume_t *min, maru_volume_t *max,
+      maru_volume *current, maru_volume *min, maru_volume *max,
       maru_usec timeout);
 
 /** \ingroup stream
@@ -364,7 +364,7 @@ maru_error maru_stream_get_volume(maru_context *ctx,
  * \param ctx libmaru context
  * \param stream Stream to set volume to.
  * If stream is set to the pseudo-stream LIBMARU_STREAM_MASTER, volume for mixer output (master) is set.
- * \param volume Volume to set. See \ref maru_volume_t on how the volume should be encoded.
+ * \param volume Volume to set. See \ref maru_volume on how the volume should be encoded.
  * \param timeout Timeout of request. See maru_stream_get_volume() for more considerations.
  * Volume can also be set to the LIBMARU_VOLUME_MUTE constant to mute.
  *
@@ -372,7 +372,7 @@ maru_error maru_stream_get_volume(maru_context *ctx,
  */
 maru_error maru_stream_set_volume(maru_context *ctx,
       maru_stream stream,
-      maru_volume_t volume,
+      maru_volume volume,
       maru_usec timeout);
 
 #ifdef __cplusplus
