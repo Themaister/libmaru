@@ -28,7 +28,7 @@ int main(void)
       if (err < 0)
          fprintf(stderr, "Error = %d\n", err);
 
-      maru_volume_t cur, min, max;
+      maru_volume cur, min, max;
       err = maru_stream_get_volume(ctx, LIBMARU_STREAM_MASTER, &cur, &min, &max, 5000000);
       if (err < 0)
          fprintf(stderr, "Error = %d\n", err);
@@ -48,6 +48,9 @@ int main(void)
       fprintf(stderr, "\tChannels: %u\n", desc[0].channels);
       fprintf(stderr, "\tBits: %u\n", desc[0].bits);
 
+      desc[0].buffer_size = 1024 * 128;
+      desc[0].fragment_size = 1024 * 32;
+
       assert(maru_stream_open(ctx, stream, desc) == LIBMARU_SUCCESS);
 
 #if 0
@@ -57,7 +60,7 @@ int main(void)
 
       for (;;)
       {
-         char buf[1024 * 16];
+         char buf[1024 * 32];
          ssize_t ret = read(0, buf, sizeof(buf));
          if (ret <= 0)
             break;

@@ -17,7 +17,10 @@
 struct maru_transfer
 {
    struct libusb_transfer *trans;
+
+   maru_context *ctx;
    struct maru_stream_internal *stream;
+
    struct maru_fifo_locked_region region;
 
    bool active;
@@ -51,6 +54,9 @@ struct maru_stream_internal
    void *error_userdata;
 
    struct transfer_list trans;
+
+   uint64_t trans_count;
+   uint64_t trans_complete_count;
 };
 
 struct maru_context
@@ -329,6 +335,34 @@ static bool poll_list_remove(int epfd, int fd)
    return epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL) == 0;
 }
 
+static void poll_list_unblock(int epfd, int fd, short events)
+{
+   struct epoll_event event = {
+      .events =
+         (events & POLLIN ? EPOLLIN : 0) |
+         (events & POLLOUT ? EPOLLOUT : 0),
+      .data = {
+         .fd = fd,
+      },
+   };
+
+   if (epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &event) < 0)
+   {
+      fprintf(stderr, "poll_list_unblock() failed!\n");
+      perror("epoll_ctl");
+   }
+}
+
+static void poll_list_block(int epfd, int fd)
+{
+   struct epoll_event event = { .events = 0, .data = { .fd = fd } };
+   if (epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &event) < 0)
+   {
+      fprintf(stderr, "poll_list_block() failed!\n");
+      perror("epoll_ctl");
+   }
+}
+
 static inline void ctx_lock(maru_context *ctx)
 {
    pthread_mutex_lock(&ctx->lock);
@@ -458,6 +492,7 @@ static bool append_transfer(struct transfer_list *list, struct maru_transfer *tr
 }
 
 #define LIBMARU_MAX_ENQUEUE_COUNT 32
+#define LIBMARU_MAX_ENQUEUE_TRANSFERS 2
 
 static struct maru_transfer *create_transfer(struct transfer_list *list, size_t required_buffer)
 {
@@ -506,6 +541,17 @@ static void transfer_stream_cb(struct libusb_transfer *trans)
 
    if (trans->status != LIBUSB_TRANSFER_COMPLETED)
       fprintf(stderr, "Stream callback: Failed transfer ... (status: %d)\n", trans->status);
+
+   transfer->stream->trans_complete_count++;
+
+   ctx_lock(transfer->ctx);
+   if (transfer->stream->fifo)
+   {
+      poll_list_unblock(transfer->ctx->epfd,
+            maru_fifo_read_notify_fd(transfer->stream->fifo),
+            POLLIN);
+   }
+   ctx_unlock(transfer->ctx);
 }
 
 static void transfer_feedback_cb(struct libusb_transfer *trans)
@@ -591,13 +637,22 @@ static bool enqueue_transfer(maru_context *ctx, struct maru_stream_internal *str
       return NULL;
 
    transfer->stream = stream;
+   transfer->ctx    = ctx;
    transfer->active = true;
+
    fill_transfer(ctx, transfer, region, packet_len, packets);
 
    if (libusb_submit_transfer(transfer->trans) < 0)
    {
       transfer->active = false;
       return false;
+   }
+
+   stream->trans_count++;
+   if (stream->trans_count - stream->trans_complete_count >=
+         LIBMARU_MAX_ENQUEUE_TRANSFERS && stream->fifo)
+   {
+      poll_list_block(ctx->epfd, maru_fifo_read_notify_fd(stream->fifo));
    }
 
    return true;
@@ -944,34 +999,21 @@ static bool init_stream_nolock(maru_context *ctx,
    if (buffer_size == 0)
       buffer_size = 1024 * 32;
 
-   size_t frame_size = (desc->sample_rate *
-      desc->channels *
-      desc->bits / 8) / 1000;
-
-   // Need a sufficiently large buffer to operate somewhat correctly.
-   // This works out to rougly 4ms.
-   if (buffer_size < 4 * frame_size)
-      return false;
-
    // Set fragment size.
    size_t frag_size = desc->fragment_size;
    if (!frag_size)
       frag_size = buffer_size >> 2;
 
-   // When POLLIN fires in thread, we want to be able
-   // to send a full frame to libusb directly from the buffer.
-   // Frame sizes might vary slighly over time (async isochronous),
-   // so be safe here and trigger on twice the nominal size.
-   size_t trigger_size = frame_size * 4;
-   if (frag_size > trigger_size)
-      trigger_size = frag_size;
-
    str->fifo = maru_fifo_new(buffer_size);
    if (!str->fifo)
       return false;
 
+   buffer_size = maru_fifo_write_avail(str->fifo);
+
+   size_t read_trigger = frag_size;
+
    if (maru_fifo_set_read_trigger(str->fifo,
-            trigger_size) < 0)
+            read_trigger) < 0)
    {
       maru_fifo_free(str->fifo);
       str->fifo = NULL;
@@ -998,6 +1040,9 @@ static bool init_stream_nolock(maru_context *ctx,
 
    str->bps = desc->sample_rate * desc->channels * desc->bits / 8;
    str->transfer_speed = str->transfer_speed_fraction;
+
+   str->trans_count = 0;
+   str->trans_complete_count = 0;
    
    return true;
 }
