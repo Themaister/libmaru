@@ -1,6 +1,6 @@
 TARGET := cuse-maru
 
-CFLAGS += -O3 -pthread -std=gnu99 -Wall -I.. $(shell pkg-config libusb-1.0 fuse --cflags)
+CFLAGS += -O0 -g -pthread -std=gnu99 -Wall -I.. $(shell pkg-config libusb-1.0 fuse --cflags)
 LDFLAGS += -pthread $(shell pkg-config libusb-1.0 fuse --libs)
 
 SOURCES := $(wildcard *.c) $(wildcard ../*.c)
@@ -15,7 +15,7 @@ $(TARGET): $(OBJECTS)
 	$(CC) -c -o $@ $< $(CFLAGS)
 
 clean:
-	rm -f *.o
+	rm -f $(OBJECTS)
 	rm -f $(TARGETS)
 
 .PHONY: all clean

@@ -81,7 +81,9 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
    stream_info->bits = 16;
    stream_info->stream = LIBMARU_STREAM_MASTER; // Invalid stream for writing.
 
-   fuse_reply_err(req, 0);
+   info->nonseekable = 1;
+   info->direct_io = 1;
+   fuse_reply_open(req, info);
 }
 
 static void write_notification_cb(void *data)
@@ -300,7 +302,6 @@ int main(int argc, char *argv[])
    device = list[0];
    free(list);
 
-   maru_context *g_ctx;
    err = maru_create_context_from_vid_pid(&g_ctx, device.vendor_id, device.product_id,
          &(const struct maru_stream_desc) { .bits = 16, .channels = 2 });
 
