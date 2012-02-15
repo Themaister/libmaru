@@ -54,9 +54,7 @@ struct maru_stream_internal
    void *error_userdata;
 
    struct transfer_list trans;
-
-   uint64_t trans_count;
-   uint64_t trans_complete_count;
+   unsigned trans_count;
 };
 
 struct maru_context
@@ -521,6 +519,7 @@ static void transfer_stream_cb(struct libusb_transfer *trans)
    transfer->active = false;
 
    ctx_lock(transfer->ctx);
+   transfer->stream->trans_count--;
    if (transfer->stream->fifo)
    {
       poll_list_unblock(transfer->ctx->epfd,
@@ -550,8 +549,6 @@ static void transfer_stream_cb(struct libusb_transfer *trans)
 
    if (trans->status != LIBUSB_TRANSFER_COMPLETED)
       fprintf(stderr, "Stream callback: Failed transfer ... (status: %d)\n", trans->status);
-
-   transfer->stream->trans_complete_count++;
 }
 
 static void transfer_feedback_cb(struct libusb_transfer *trans)
@@ -649,11 +646,8 @@ static bool enqueue_transfer(maru_context *ctx, struct maru_stream_internal *str
    }
 
    stream->trans_count++;
-   if (stream->trans_count - stream->trans_complete_count >=
-         LIBMARU_MAX_ENQUEUE_TRANSFERS && stream->fifo)
-   {
+   if (stream->trans_count >= LIBMARU_MAX_ENQUEUE_TRANSFERS && stream->fifo)
       poll_list_block(ctx->epfd, maru_fifo_read_notify_fd(stream->fifo));
-   }
 
    return true;
 }
@@ -889,12 +883,14 @@ static void handle_request(maru_context *ctx,
          req.index,
          req.size);
 
+#if 0
    fprintf(stderr, "Request:\n");
-   fprintf(stderr, "\tRequest Type: 0x%02x\n", req.request_type);
-   fprintf(stderr, "\tRequest:      0x%02x\n", req.request);
-   fprintf(stderr, "\tValue:        0x%04x\n", req.value);
-   fprintf(stderr, "\tIndex:        0x%04x\n", req.index);
-   fprintf(stderr, "\tSize:         0x%04x\n", req.size);
+   fprintf(stderr, "\tRequest Type: 0x%02x\n", (unsigned)req.request_type);
+   fprintf(stderr, "\tRequest:      0x%02x\n", (unsigned)req.request);
+   fprintf(stderr, "\tValue:        0x%04x\n", (unsigned)req.value);
+   fprintf(stderr, "\tIndex:        0x%04x\n", (unsigned)req.index);
+   fprintf(stderr, "\tSize:         0x%04x\n", (unsigned)req.size);
+#endif
 
    libusb_fill_control_transfer(trans,
          ctx->handle,
@@ -1040,10 +1036,8 @@ static bool init_stream_nolock(maru_context *ctx,
 
    str->bps = desc->sample_rate * desc->channels * desc->bits / 8;
    str->transfer_speed = str->transfer_speed_fraction;
-
    str->trans_count = 0;
-   str->trans_complete_count = 0;
-   
+
    return true;
 }
 
