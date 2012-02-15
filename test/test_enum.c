@@ -24,8 +24,7 @@ int main(void)
       assert(maru_create_context_from_vid_pid(&ctx, list[0].vendor_id,
                list[0].product_id) == LIBMARU_SUCCESS);
 
-#if 0
-      maru_error err = maru_stream_set_volume(ctx, LIBMARU_STREAM_MASTER, -10 * 256, 5000000);
+      maru_error err = maru_stream_set_volume(ctx, LIBMARU_STREAM_MASTER, -30 * 256, 5000000);
       if (err < 0)
          fprintf(stderr, "Error = %d\n", err);
 
@@ -34,7 +33,6 @@ int main(void)
       if (err < 0)
          fprintf(stderr, "Error = %d\n", err);
       fprintf(stderr, "Current: %d, Min: %d, Max: %d\n", cur / 256, min / 256, max / 256);
-#endif
 
       fprintf(stderr, "Streams: %d\n", maru_get_num_streams(ctx));
 

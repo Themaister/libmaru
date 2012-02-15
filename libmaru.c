@@ -772,6 +772,11 @@ static void transfer_control_cb(struct libusb_transfer *trans)
          break;
       }
 
+      case LIBUSB_TRANSFER_ERROR:
+         buf->error = LIBMARU_ERROR_IO;
+         fprintf(stderr, "Control transfer failed!\n");
+         break;
+
       default:
          buf->error = LIBMARU_ERROR_IO;
          break;
@@ -806,14 +811,23 @@ static void handle_request(maru_context *ctx,
       return;
    }
 
+   *buf = req;
+
+   req.request_type |= req.request & USB_REQUEST_DIR_MASK;
+
    libusb_fill_control_setup(buf->data.setup,
-         req.request_type | (req.request & USB_REQUEST_DIR_MASK),
+         req.request_type,
          req.request,
          req.value,
          req.index,
          req.size);
 
-   *buf = req;
+   fprintf(stderr, "Request:\n");
+   fprintf(stderr, "\tRequest Type: 0x%02x\n", req.request_type);
+   fprintf(stderr, "\tRequest:      0x%02x\n", req.request);
+   fprintf(stderr, "\tValue:        0x%04x\n", req.value);
+   fprintf(stderr, "\tIndex:        0x%04x\n", req.index);
+   fprintf(stderr, "\tSize:         0x%04x\n", req.size);
 
    libusb_fill_control_transfer(trans,
          ctx->handle,
@@ -824,6 +838,7 @@ static void handle_request(maru_context *ctx,
 
    if (libusb_submit_transfer(trans) < 0)
    {
+      fprintf(stderr, "Submit transfer failed ...\n");
       free(buf);
       libusb_free_transfer(trans);
 
@@ -1463,10 +1478,16 @@ static int perform_pitch_request(maru_context *ctx,
 static maru_error perform_volume_request(maru_context *ctx,
       maru_volume_t *vol, uint8_t request, maru_usec timeout)
 {
-   return perform_request(ctx,
+   uint16_t swapped = libusb_cpu_to_le16(*vol);
+
+   maru_error err = perform_request(ctx,
          LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_DEVICE, request,
          2 << 8, 0,
-         vol, sizeof(*vol), timeout);
+         &swapped, sizeof(swapped), timeout);
+
+   *vol = libusb_le16_to_cpu(swapped);
+
+   return err;
 }
 
 maru_error maru_stream_get_volume(maru_context *ctx,
