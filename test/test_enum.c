@@ -22,9 +22,9 @@ int main(void)
    {
       maru_context *ctx;
       assert(maru_create_context_from_vid_pid(&ctx, list[0].vendor_id,
-               list[0].product_id) == LIBMARU_SUCCESS);
+               list[0].product_id, &(const struct maru_stream_desc) { .channels = 2, .bits = 16 }) == LIBMARU_SUCCESS);
 
-      maru_error err = maru_stream_set_volume(ctx, LIBMARU_STREAM_MASTER, -30 * 256, 5000000);
+      maru_error err = maru_stream_set_volume(ctx, LIBMARU_STREAM_MASTER, -20 * 256, 5000000);
       if (err < 0)
          fprintf(stderr, "Error = %d\n", err);
 

@@ -168,17 +168,29 @@ static int find_interface_class_index(const struct libusb_config_descriptor *con
 
 static bool parse_audio_format(const uint8_t *data, size_t size, struct maru_stream_desc *desc);
 
-static bool format_has_num_channels(const struct libusb_interface_descriptor *desc,
-      unsigned channels)
+static bool format_matches(const struct libusb_interface_descriptor *iface,
+      const struct maru_stream_desc *desc)
 {
    struct maru_stream_desc format_desc;
 
-   return parse_audio_format(desc->extra, desc->extra_length, &format_desc) &&
-         format_desc.channels == channels;
+   if (!parse_audio_format(iface->extra, iface->extra_length, &format_desc))
+      return false;
+
+   if (!desc)
+      return true;
+
+   if (desc->sample_rate && desc->sample_rate != format_desc.sample_rate)
+      return false;
+   if (desc->channels && desc->channels != format_desc.channels)
+      return false;
+   if (desc->bits && desc->bits != format_desc.bits)
+      return false;
+
+   return true;
 }
 
 static int find_stream_interface_alt(const struct libusb_config_descriptor *conf,
-      unsigned channels, int *altsetting)
+      const struct maru_stream_desc *format_desc, int *altsetting)
 {
    for (unsigned i = 0; i < conf->bNumInterfaces; i++)
    {
@@ -190,7 +202,7 @@ static int find_stream_interface_alt(const struct libusb_config_descriptor *conf
          if (desc->bInterfaceClass == USB_CLASS_AUDIO &&
                desc->bInterfaceSubClass == USB_SUBCLASS_AUDIO_STREAMING &&
                desc->bNumEndpoints >= 1 &&
-               format_has_num_channels(desc, channels))
+               format_matches(desc, format_desc))
          {
             if (altsetting)
                *altsetting = j;
@@ -1038,7 +1050,8 @@ static bool enumerate_endpoints(maru_context *ctx, const struct libusb_config_de
    return true;
 }
 
-static bool enumerate_streams(maru_context *ctx)
+static bool enumerate_streams(maru_context *ctx,
+      const struct maru_stream_desc *desc)
 {
    struct libusb_config_descriptor *conf = ctx->conf;
 
@@ -1047,10 +1060,8 @@ static bool enumerate_streams(maru_context *ctx)
 
    int altsetting = 0;
 
-   // Only use interface that has 2 channels for now.
-   // TODO: Expose way to set different number of channels.
    int stream_index = find_stream_interface_alt(conf,
-         2, &altsetting);
+         desc, &altsetting);
 
    if (ctrl_index < 0 || stream_index < 0)
       return false;
@@ -1059,7 +1070,9 @@ static bool enumerate_streams(maru_context *ctx)
    ctx->stream_interface = stream_index;
    ctx->stream_altsetting = altsetting;
 
-   fprintf(stderr, "CTRL: %d, STREAM: %d(%d)\n", ctrl_index, stream_index, altsetting);
+#if 0
+   fprintf(stderr, "Found interface CTRL: %d, STREAM: %d(%d)\n", ctrl_index, stream_index, altsetting);
+#endif
 
    int ifaces[2] = { ctrl_index, stream_index };
    for (unsigned i = 0; i < 2; i++)
@@ -1086,7 +1099,8 @@ static bool enumerate_streams(maru_context *ctx)
 }
 
 maru_error maru_create_context_from_vid_pid(maru_context **ctx,
-      uint16_t vid, uint16_t pid)
+      uint16_t vid, uint16_t pid,
+      const struct maru_stream_desc *desc)
 {
    maru_context *context = calloc(1, sizeof(*context));
    if (!context)
@@ -1124,7 +1138,7 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
    if (!conf_is_audio_class(context->conf))
       goto error;
 
-   if (!enumerate_streams(context))
+   if (!enumerate_streams(context, desc))
       goto error;
 
    if (!poll_list_init(context))
@@ -1189,9 +1203,11 @@ void maru_destroy_context(maru_context *ctx)
    if (ctx->ctx)
       libusb_exit(ctx->ctx);
 
+#if 0
    fprintf(stderr, "Performance count:\n");
    fprintf(stderr, "epoll_wait() calls: %zu\n", ctx->epoll_wait_cnt);
    fprintf(stderr, "libusb_handle_events() calls: %zu\n", ctx->libusb_call_cnt);
+#endif
 
    free(ctx);
 }

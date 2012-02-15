@@ -60,87 +60,6 @@ typedef enum
    LIBMARU_ERROR_UNKNOWN   = INT_MIN /**< Unknown error (Also used to enforce int size of enum) */
 } maru_error;
 
-/** \ingroup lib
- * \brief Translate \ref maru_error to human readable string.
- */
-const char *maru_error_string(maru_error error);
-
-/** \ingroup lib
- * \brief List all connected USB audio devices in the system.
- *
- * Get a list of all connected USB devices that advertise themselves as
- * complying to the USB audio class.
- *
- * \param list Pointer to a list that will be allocated.
- * If this function returns successfully and num_devices is larger than 0,
- * caller must call \c free() on the list when not needed anymore.
- *
- * \param num_devices Receives number of devices found.
- *
- * \returns Error code \ref maru_error
- */
-maru_error maru_list_audio_devices(struct maru_audio_device **list, unsigned *num_devices);
-
-/** \ingroup lib
- * \brief Create new context from vendor and product IDs.
- *
- * Creates a new context for a device.
- * Will attempt to claim the interfaces necessary from kernel.
- * Opening a device might require root privileges, depending on the system.
- *
- * \param ctx Pointer to a context that is to be initialized.
- * \param vid Vendor ID
- * \param pid Product ID
- *
- * \returns Error code \ref maru_error
- */
-maru_error maru_create_context_from_vid_pid(maru_context **ctx, uint16_t vid, uint16_t pid);
-
-/** \ingroup lib
- * \brief Destroy previously allocated context.
- *
- * \param ctx libmaru context.
- */
-void maru_destroy_context(maru_context *ctx);
-
-/** \ingroup lib
- * \brief Returns number of hardware streams in total.
- *
- * \param ctx libmaru context
- * \returns Available hardware streams.
- * If negative, the value represents an error code \ref maru_error.
- */
-int maru_get_num_streams(maru_context *ctx);
-
-/** \ingroup lib
- * \brief Checks if a stream is currently being used.
- *
- * \param ctx libmaru context
- * \param stream Stream index. Possible indices are in the range of
- * [0, \c maru_get_num_streams() - 1] inclusive.
- *
- * \returns 1 if stream can be used, 0 if it is already being used, negative if error \ref maru_error occured.
- */
-int maru_is_stream_available(maru_context *ctx, maru_stream stream);
-
-/** \ingroup lib
- * \brief Finds first available stream.
- *
- * This function will look through available streams
- * and attempt to find the first vacant stream.
- * Even if this function finds a stream,
- * a different thread could potentially claim
- * the stream in question before the thread
- * calling maru_find_available_stream()
- * can actually claim it. If this is a likely scenario,
- * maru_find_available_stream() should be called again,
- * until a stream is successfully created or fails.
- *
- * \param ctx libmaru context
- * \returns Available stream is returned. If error, error code \ref maru_error is returned.
- */
-int maru_find_available_stream(maru_context *ctx);
-
 /** \ingroup stream
  * A struct describing audio stream parameters for plain PCM streams.
  *
@@ -192,6 +111,101 @@ struct maru_stream_desc
     * \ref sample_rate will not be set to an appropriate value if these fields are set. */
    unsigned sample_rate_max;
 };
+
+/** \ingroup lib
+ * \brief Translate \ref maru_error to human readable string.
+ */
+const char *maru_error_string(maru_error error);
+
+/** \ingroup lib
+ * \brief List all connected USB audio devices in the system.
+ *
+ * Get a list of all connected USB devices that advertise themselves as
+ * complying to the USB audio class.
+ *
+ * \param list Pointer to a list that will be allocated.
+ * If this function returns successfully and num_devices is larger than 0,
+ * caller must call \c free() on the list when not needed anymore.
+ *
+ * \param num_devices Receives number of devices found.
+ *
+ * \returns Error code \ref maru_error
+ */
+maru_error maru_list_audio_devices(struct maru_audio_device **list, unsigned *num_devices);
+
+/** \ingroup lib
+ * \brief Create new context from vendor and product IDs.
+ *
+ * Creates a new context for a device.
+ * Will attempt to claim the interfaces necessary from kernel.
+ * Opening a device might require root privileges, depending on the system.
+ *
+ * \param ctx Pointer to a context that is to be initialized.
+ * \param vid Vendor ID
+ * \param pid Product ID
+ *
+ * \param desc Optional stream description.
+ * If not NULL, libmaru will attempt to claim the audio interface that has
+ * at least one stream description which matches the one given in desc.
+ *
+ * This is to deal with cases where a USB device might be
+ * configured in different ways, i.e. 2ch vs. 6ch, etc.
+ * 
+ * The fields sample_rate, channels and bits must all match for the interface to be claimed. If a field is set to 0, it will match everything.
+ *
+ * If desc is NULL, the first audio interface will be claimed, and available stream formats must be queried with maru_get_stream_desc().
+ *
+ * \returns Error code \ref maru_error
+ */
+maru_error maru_create_context_from_vid_pid(maru_context **ctx,
+      uint16_t vid, uint16_t pid,
+      const struct maru_stream_desc *desc);
+
+/** \ingroup lib
+ * \brief Destroy previously allocated context.
+ *
+ * \param ctx libmaru context.
+ */
+void maru_destroy_context(maru_context *ctx);
+
+/** \ingroup lib
+ * \brief Returns number of hardware streams in total.
+ *
+ * \param ctx libmaru context
+ * \returns Available hardware streams.
+ * If negative, the value represents an error code \ref maru_error.
+ */
+int maru_get_num_streams(maru_context *ctx);
+
+/** \ingroup lib
+ * \brief Checks if a stream is currently being used.
+ *
+ * \param ctx libmaru context
+ * \param stream Stream index. Possible indices are in the range of
+ * [0, \c maru_get_num_streams() - 1] inclusive.
+ *
+ * \returns 1 if stream can be used, 0 if it is already being used, negative if error \ref maru_error occured.
+ */
+int maru_is_stream_available(maru_context *ctx, maru_stream stream);
+
+/** \ingroup lib
+ * \brief Finds first available stream.
+ *
+ * This function will look through available streams
+ * and attempt to find the first vacant stream.
+ * Even if this function finds a stream,
+ * a different thread could potentially claim
+ * the stream in question before the thread
+ * calling maru_find_available_stream()
+ * can actually claim it. If this is a likely scenario,
+ * maru_find_available_stream() should be called again,
+ * until a stream is successfully created or fails.
+ *
+ * \param ctx libmaru context
+ * \returns Available stream is returned. If error, error code \ref maru_error is returned.
+ */
+int maru_find_available_stream(maru_context *ctx);
+
 
 /** \ingroup stream
  * \brief Obtains all supported \ref maru_stream_desc for a given stream.
