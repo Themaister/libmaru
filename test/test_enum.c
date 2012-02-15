@@ -25,13 +25,12 @@ int main(void)
                list[0].product_id, &(const struct maru_stream_desc) { .channels = 2, .bits = 16 }) == LIBMARU_SUCCESS);
 
       maru_error err = maru_stream_set_volume(ctx, LIBMARU_STREAM_MASTER, -20 * 256, 5000000);
-      if (err < 0)
-         fprintf(stderr, "Error = %d\n", err);
+      MARU_LOG_ERROR(err);
 
       maru_volume cur, min, max;
       err = maru_stream_get_volume(ctx, LIBMARU_STREAM_MASTER, &cur, &min, &max, 5000000);
-      if (err < 0)
-         fprintf(stderr, "Error = %d\n", err);
+      MARU_LOG_ERROR(err);
+
       fprintf(stderr, "Current: %d, Min: %d, Max: %d\n", cur / 256, min / 256, max / 256);
 
       fprintf(stderr, "Streams: %d\n", maru_get_num_streams(ctx));

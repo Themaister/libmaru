@@ -118,6 +118,16 @@ struct maru_stream_desc
 const char *maru_error_string(maru_error error);
 
 /** \ingroup lib
+ * \brief Macro that logs a \ref maru_error to stderr with line/file information for debugging.
+ */
+#define MARU_LOG_ERROR(error) do { \
+   fprintf(stderr, \
+         "[libmaru] @ %s:%d: Error: \"%s\"\n", \
+         __FILE__, __LINE__, \
+         maru_error_string(error)); \
+} while(0)
+
+/** \ingroup lib
  * \brief List all connected USB audio devices in the system.
  *
  * Get a list of all connected USB devices that advertise themselves as

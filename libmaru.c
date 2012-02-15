@@ -520,6 +520,15 @@ static void transfer_stream_cb(struct libusb_transfer *trans)
    struct maru_transfer *transfer = trans->user_data;
    transfer->active = false;
 
+   ctx_lock(transfer->ctx);
+   if (transfer->stream->fifo)
+   {
+      poll_list_unblock(transfer->ctx->epfd,
+            maru_fifo_read_notify_fd(transfer->stream->fifo),
+            POLLIN);
+   }
+   ctx_unlock(transfer->ctx);
+
    if (trans->status == LIBUSB_TRANSFER_CANCELLED)
       return;
 
@@ -543,15 +552,6 @@ static void transfer_stream_cb(struct libusb_transfer *trans)
       fprintf(stderr, "Stream callback: Failed transfer ... (status: %d)\n", trans->status);
 
    transfer->stream->trans_complete_count++;
-
-   ctx_lock(transfer->ctx);
-   if (transfer->stream->fifo)
-   {
-      poll_list_unblock(transfer->ctx->epfd,
-            maru_fifo_read_notify_fd(transfer->stream->fifo),
-            POLLIN);
-   }
-   ctx_unlock(transfer->ctx);
 }
 
 static void transfer_feedback_cb(struct libusb_transfer *trans)
@@ -1623,5 +1623,33 @@ maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream)
       return LIBMARU_ERROR_INVALID;
 
    return (maru_fifo_buffered_size(ctx->streams[stream].fifo) * INT64_C(1000000)) / ctx->streams[stream].bps;
+}
+
+const char *maru_error_string(maru_error error)
+{
+   switch (error)
+   {
+      case LIBMARU_SUCCESS:
+         return "No error";
+      case LIBMARU_ERROR_GENERIC:
+         return "Generic error";
+      case LIBMARU_ERROR_IO:
+         return "I/O error";
+      case LIBMARU_ERROR_BUSY:
+         return "Device is busy";
+      case LIBMARU_ERROR_ACCESS:
+         return "Permissions error";
+      case LIBMARU_ERROR_INVALID:
+         return "Invalid argument";
+      case LIBMARU_ERROR_MEMORY:
+         return "Allocation error";
+      case LIBMARU_ERROR_DEAD:
+         return "Data structure is dead";
+      case LIBMARU_ERROR_TIMEOUT:
+         return "Timeout";
+      case LIBMARU_ERROR_UNKNOWN:
+      default:
+         return "Unknown error";
+   }
 }
 
