@@ -14,6 +14,7 @@
 #include <pthread.h>
 #include <sys/poll.h>
 #include <signal.h>
+#include <assert.h>
 
 #define MAX_STREAMS 8
 
@@ -33,7 +34,11 @@ struct stream_info
    int channels;
    int bits;
 
+   int fragsize;
+   int frags;
+
    bool nonblock;
+   uint64_t write_cnt;
 };
 
 static struct stream_info g_stream_info[MAX_STREAMS];
@@ -81,6 +86,9 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
    stream_info->bits = 16;
    stream_info->stream = LIBMARU_STREAM_MASTER; // Invalid stream for writing.
 
+   stream_info->fragsize = 4096;
+   stream_info->frags = 8;
+
    info->nonseekable = 1;
    info->direct_io = 1;
    fuse_reply_open(req, info);
@@ -109,9 +117,11 @@ static bool init_stream(struct stream_info *info)
 
    maru_error err = maru_stream_open(g_ctx, stream,
          &(const struct maru_stream_desc) {
-            .sample_rate = info->sample_rate,
-            .channels    = info->channels,
-            .bits        = info->bits,
+            .sample_rate   = info->sample_rate,
+            .channels      = info->channels,
+            .bits          = info->bits,
+            .fragment_size = info->fragsize,
+            .buffer_size   = info->fragsize * info->frags,
          });
 
    if (err != LIBMARU_SUCCESS)
@@ -164,14 +174,313 @@ static void maru_write(fuse_req_t req, const char *data, size_t size, off_t off,
    if (ret == 0)
       fuse_reply_err(req, EIO);
    else
+   {
+      stream_info->write_cnt += ret;
       fuse_reply_write(req, ret);
+   }
 }
+
+// Almost straight copypasta from OSS Proxy.
+// It seems that memory is mapped directly between two different processes.
+// Since ioctl() does not contain any size information for its arguments, we first have to tell it how much
+// memory we want to map between the two different processes, then ask it to call ioctl() again.
+static bool ioctl_prep_uarg(fuse_req_t req,
+      void *in, size_t in_size,
+      void *out, size_t out_size,
+      void *uarg,
+      const void *in_buf, size_t in_bufsize, size_t out_bufsize)
+{
+   bool retry = false;
+   struct iovec in_iov = {0};
+   struct iovec out_iov = {0};
+
+   if (in)
+   {
+      if (in_bufsize == 0)
+      {
+         in_iov.iov_base = uarg;
+         in_iov.iov_len = in_size;
+         retry = true;
+      }
+      else
+      {
+         assert(in_bufsize == in_size);
+         memcpy(in, in_buf, in_size);
+      }
+   }
+
+   if (out)
+   {
+      if (out_bufsize == 0)
+      {
+         out_iov.iov_base = uarg;
+         out_iov.iov_len = out_size;
+         retry = true;
+      }
+      else
+      {
+         assert(out_bufsize == out_size);
+      }
+   }
+
+   if (retry)
+      fuse_reply_ioctl_retry(req, &in_iov, 1, &out_iov, 1);
+
+   return retry;
+}
+
+#define IOCTL_RETURN(addr) do { \
+   fuse_reply_ioctl(req, 0, addr, sizeof(*(addr))); \
+} while(0)
+
+#define IOCTL_RETURN_NULL() do { \
+   fuse_reply_ioctl(req, 0, NULL, 0); \
+} while(0)
+
+#define PREP_UARG(inp, inp_s, outp, outp_s) do { \
+   if (ioctl_prep_uarg(req, inp, inp_s, \
+            outp, outp_s, uarg, \
+            in_buf, in_bufsize, out_bufsize)) \
+      return; \
+} while(0)
+
+#define PREP_UARG_OUT(outp) PREP_UARG(NULL, 0, outp, sizeof(*(outp)))
+#define PREP_UARG_INOUT(inp, outp) PREP_UARG(inp, sizeof(*(inp)), outp, sizeof(*(outp)))
+
 
 static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       struct fuse_file_info *info, unsigned flags,
       const void *in_buf, size_t in_bufsize, size_t out_bufsize)
 {
-   fuse_reply_err(req, ENOSYS);
+   struct stream_info *stream_info = &g_stream_info[info->fh];
+
+   unsigned cmd = signed_cmd;
+   int i = 0;
+
+   switch (cmd)
+   {
+#ifdef OSS_GETVERSION
+      case OSS_GETVERSION:
+         PREP_UARG_OUT(&i);
+         i = (3 << 16) | (8 << 8) | (1 << 4) | 0; // 3.8.1
+         IOCTL_RETURN(&i);
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_COOKEDMODE
+      case SNDCTL_DSP_COOKEDMODE:
+         PREP_UARG_INOUT(&i, &i);
+         IOCTL_RETURN(&i);
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_NONBLOCK
+      case SNDCTL_DSP_NONBLOCK:
+         stream_info->nonblock = true;
+         IOCTL_RETURN_NULL();
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_GETCAPS
+      case SNDCTL_DSP_GETCAPS:
+         PREP_UARG_OUT(&i);
+         i = DSP_CAP_REALTIME | (maru_get_num_streams(g_ctx) > 1 ? DSP_CAP_MULTI : 0);
+         IOCTL_RETURN(&i);
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_RESET
+      case SNDCTL_DSP_RESET:
+#if defined(SNDCTL_DSP_HALT) && (SNDCTL_DSP_HALT != SNDCTL_DSP_RESET)
+      case SNDCTL_DSP_HALT:
+#endif
+         if (stream_info->stream != LIBMARU_STREAM_MASTER)
+         {
+            maru_stream_close(g_ctx, stream_info->stream);
+            stream_info->stream = LIBMARU_STREAM_MASTER;
+            stream_info->write_cnt = 0;
+         }
+         IOCTL_RETURN_NULL();
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_SPEED
+      case SNDCTL_DSP_SPEED:
+         PREP_UARG_INOUT(&i, &i);
+         i = stream_info->sample_rate; // Hack for now.
+         IOCTL_RETURN(&i);
+         break;
+#endif
+
+#ifdef SNDCTL_GETFMTS
+      case SNDCTL_DSP_GETFMTS: // They essentially do the same thing ...
+#endif
+#ifdef SNDCTL_DSP_SETFMT
+      case SNDCTL_DSP_SETFMT:
+         PREP_UARG_INOUT(&i, &i);
+         switch (stream_info->bits)
+         {
+            case 8:
+               i = AFMT_U8;
+               break;
+
+            case 16:
+               i = AFMT_S16_LE; // USB spec is little endian only.
+               break;
+         }
+         IOCTL_RETURN(&i);
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_CHANNELS
+      case SNDCTL_DSP_CHANNELS:
+         PREP_UARG_INOUT(&i, &i);
+         i = stream_info->channels;
+         IOCTL_RETURN(&i);
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_STEREO
+      case SNDCTL_DSP_STEREO:
+      {
+         PREP_UARG_INOUT(&i, &i);
+         i = stream_info->channels > 1 ? 1 : 0;
+         IOCTL_RETURN(&i);
+         break;
+      }
+#endif
+
+#ifdef SNDCTL_DSP_GETOSPACE
+      case SNDCTL_DSP_GETOSPACE:
+      {
+         size_t write_avail = stream_info->fragsize * stream_info->frags;
+         if (stream_info->stream != LIBMARU_STREAM_MASTER)
+            write_avail = maru_stream_write_avail(g_ctx, stream_info->stream);
+
+         audio_buf_info audio_info = {
+            .bytes      = write_avail,
+            .fragments  = write_avail / stream_info->fragsize,
+            .fragsize   = stream_info->fragsize,
+            .fragstotal = stream_info->frags,
+         };
+
+         PREP_UARG_OUT(&audio_info);
+         IOCTL_RETURN(&audio_info);
+         break;
+      }
+#endif
+
+#ifdef SNDCTL_DSP_GETBLKSIZE
+      case SNDCTL_DSP_GETBLKSIZE:
+         PREP_UARG_OUT(&i);
+         i = stream_info->fragsize;
+         IOCTL_RETURN(&i);
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_SETFRAGMENT
+      case SNDCTL_DSP_SETFRAGMENT:
+      {
+         if (stream_info->stream != LIBMARU_STREAM_MASTER)
+         {
+            fuse_reply_err(req, EINVAL);
+            break;
+         }
+
+         PREP_UARG_INOUT(&i, &i);
+         int frags = (i >> 16) & 0xffff;
+         int fragsize = 1 << (i & 0xffff);
+
+         if (fragsize < 128)
+            fragsize = 128;
+         if (frags < 4)
+            frags = 4;
+
+         stream_info->fragsize = fragsize;
+         stream_info->frags    = frags;
+
+         IOCTL_RETURN(&i);
+         break;
+      }
+#endif
+
+#ifdef SNDCTL_DSP_GETODELAY
+      case SNDCTL_DSP_GETODELAY:
+      {
+         PREP_UARG_OUT(&i);
+         maru_usec lat = maru_stream_current_latency(g_ctx, stream_info->stream);
+
+         if (lat < 0)
+            i = 0;
+         else
+            i = (lat * stream_info->sample_rate * stream_info->channels * stream_info->bits / 8) / 1000000;
+
+         IOCTL_RETURN(&i);
+         break;
+      }
+#endif
+
+         // TODO: Add proper support for this in libmaru?
+#ifdef SNDCTL_DSP_SYNC
+      case SNDCTL_DSP_SYNC:
+         if (stream_info->stream != LIBMARU_STREAM_MASTER)
+         {
+            maru_usec lat = maru_stream_current_latency(g_ctx, stream_info->stream);
+            if (lat >= 0)
+               usleep(lat);
+         }
+         IOCTL_RETURN_NULL();
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_GETOPTR
+      case SNDCTL_DSP_GETOPTR:
+      {
+         count_info ci = {
+            .bytes  = stream_info->write_cnt,
+            .blocks = stream_info->write_cnt / stream_info->fragsize,
+            .ptr    = stream_info->write_cnt % (stream_info->fragsize * stream_info->frags),
+         };
+
+         PREP_UARG_OUT(&ci);
+         IOCTL_RETURN(&ci);
+         break;
+      }
+#endif
+
+         // TODO: Implement volum control properly.
+#ifdef SNDCTL_DSP_SETPLAYVOL
+      case SNDCTL_DSP_SETPLAYVOL:
+         PREP_UARG_INOUT(&i, &i);
+         i = (100 << 8) | 100;
+         IOCTL_RETURN(&i);
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_GETPLAYVOL
+      case SNDCTL_DSP_GETPLAYVOL:
+         PREP_UARG_OUT(&i);
+         i = (100 << 8) | 100;
+         IOCTL_RETURN(&i);
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_SETTRIGGER
+      case SNDCTL_DSP_SETTRIGGER:
+         PREP_UARG_INOUT(&i, &i);
+         IOCTL_RETURN(&i); // No reason to care about this for now. Maybe when/if mmap() gets implemented.
+         break;
+#endif
+
+#ifdef SNDCTL_DSP_POST
+      case SNDCTL_DSP_POST:
+         IOCTL_RETURN_NULL();
+         break;
+#endif
+
+      default:
+         fuse_reply_err(req, EINVAL);
+   }
 }
 
 static void maru_update_pollhandle(struct stream_info *info, struct fuse_pollhandle *ph)
@@ -207,7 +516,10 @@ static void maru_release(fuse_req_t req, struct fuse_file_info *info)
    struct stream_info *stream_info = &g_stream_info[info->fh];
 
    maru_stream_close(g_ctx, stream_info->stream);
-   maru_update_pollhandle(stream_info, NULL);
+
+   if (stream_info->ph)
+      fuse_pollhandle_destroy(stream_info->ph);
+
    pthread_mutex_destroy(&stream_info->lock);
 
    memset(stream_info, 0, sizeof(*stream_info));
@@ -239,7 +551,7 @@ static void print_help(void)
    fprintf(stderr, "CUSE-ROSS Usage:\n");
    fprintf(stderr, "\t-M major, --maj=major\n");
    fprintf(stderr, "\t-m minor, --min=minor\n");
-   fprintf(stderr, "\t-n name, --name=name (default: ross)\n");
+   fprintf(stderr, "\t-n name, --name=name (default: maru)\n");
    fprintf(stderr, "\t\tDevice will be created in /dev/$name.\n");
    fprintf(stderr, "\n");
 }

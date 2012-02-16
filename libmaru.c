@@ -13,6 +13,7 @@
 #include <sys/eventfd.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <time.h>
 
 struct maru_transfer
 {
@@ -55,6 +56,9 @@ struct maru_stream_internal
 
    struct transfer_list trans;
    unsigned trans_count;
+
+   bool valid_last_latency;
+   struct timespec last_latency_update;
 };
 
 struct maru_context
@@ -489,7 +493,7 @@ static bool append_transfer(struct transfer_list *list, struct maru_transfer *tr
    return true;
 }
 
-#define LIBMARU_MAX_ENQUEUE_COUNT 32
+#define LIBMARU_MAX_ENQUEUE_COUNT 8
 #define LIBMARU_MAX_ENQUEUE_TRANSFERS 2
 
 static struct maru_transfer *create_transfer(struct transfer_list *list, size_t required_buffer)
@@ -513,12 +517,37 @@ error:
    return NULL;
 }
 
+static void update_last_latency(struct maru_stream_internal *stream)
+{
+   stream->valid_last_latency =
+      clock_gettime(CLOCK_MONOTONIC, &stream->last_latency_update) == 0;
+}
+
+static maru_usec latency_offset(struct maru_stream_internal *stream)
+{
+   if (!stream->valid_last_latency)
+   {
+      fprintf(stderr, "Non-valid last latency :(\n");
+      return 0;
+   }
+
+   struct timespec tv;
+   if (clock_gettime(CLOCK_MONOTONIC, &tv) < 0)
+      return 0;
+
+   int64_t diff_usec = (int64_t)(stream->last_latency_update.tv_nsec - tv.tv_nsec) / 1000;
+   diff_usec += ((int64_t)stream->last_latency_update.tv_sec - (int64_t)tv.tv_sec) * 1000000;
+
+   return diff_usec;
+}
+
 static void transfer_stream_cb(struct libusb_transfer *trans)
 {
    struct maru_transfer *transfer = trans->user_data;
    transfer->active = false;
 
    ctx_lock(transfer->ctx);
+
    transfer->stream->trans_count--;
    if (transfer->stream->fifo)
    {
@@ -526,13 +555,15 @@ static void transfer_stream_cb(struct libusb_transfer *trans)
             maru_fifo_read_notify_fd(transfer->stream->fifo),
             POLLIN);
    }
+
+   update_last_latency(transfer->stream);
+   if (transfer->stream->fifo)
+      maru_fifo_read_unlock(transfer->stream->fifo, &transfer->region);
+
    ctx_unlock(transfer->ctx);
 
    if (trans->status == LIBUSB_TRANSFER_CANCELLED)
       return;
-
-   if (transfer->stream->fifo && maru_fifo_read_unlock(transfer->stream->fifo, &transfer->region) != LIBMARU_SUCCESS)
-      fprintf(stderr, "Stream callback: Failed to unlock fifo!\n");
 
    maru_notification_cb cb = transfer->stream->write_cb;
    void *userdata = transfer->stream->write_userdata;
@@ -638,6 +669,8 @@ static bool enqueue_transfer(maru_context *ctx, struct maru_stream_internal *str
    transfer->active = true;
 
    fill_transfer(ctx, transfer, region, packet_len, packets);
+
+   update_last_latency(stream);
 
    if (libusb_submit_transfer(transfer->trans) < 0)
    {
@@ -1037,6 +1070,8 @@ static bool init_stream_nolock(maru_context *ctx,
    str->bps = desc->sample_rate * desc->channels * desc->bits / 8;
    str->transfer_speed = str->transfer_speed_fraction;
    str->trans_count = 0;
+
+   str->valid_last_latency = false;
 
    return true;
 }
@@ -1616,7 +1651,11 @@ maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream)
    if (!ctx->streams[stream].fifo)
       return LIBMARU_ERROR_INVALID;
 
-   return (maru_fifo_buffered_size(ctx->streams[stream].fifo) * INT64_C(1000000)) / ctx->streams[stream].bps;
+   maru_usec ret = (maru_fifo_buffered_size(ctx->streams[stream].fifo) * INT64_C(1000000)) / ctx->streams[stream].bps;
+   ctx_lock(ctx);
+   ret += latency_offset(&ctx->streams[stream]);
+   ctx_unlock(ctx);
+   return ret;
 }
 
 const char *maru_error_string(maru_error error)
