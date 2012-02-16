@@ -51,13 +51,6 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
       return;
    }
 
-   int avail_stream = maru_find_available_stream(g_ctx);
-   if (avail_stream < 0)
-   {
-      fuse_reply_err(req, EBUSY);
-      return;
-   }
-
    bool found = false;
    for (unsigned i = 0; i < MAX_STREAMS; i++)
    {
@@ -448,27 +441,76 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       }
 #endif
 
-         // TODO: Implement volum control properly.
-#ifdef SNDCTL_DSP_SETPLAYVOL
+      // We really want this no matter what ...
+#ifndef SNDCTL_DSP_SETPLAYVOL
+#define SNDCTL_DSP_SETPLAYVOL _SIOWR('P', 24, int)
+#endif
       case SNDCTL_DSP_SETPLAYVOL:
+      {
          PREP_UARG_INOUT(&i, &i);
-         i = (100 << 8) | 100;
+         int left = i & 0xff;
+
+         maru_volume min, max;
+         if (maru_stream_get_volume(g_ctx, LIBMARU_STREAM_MASTER,
+                  NULL, &min, &max, 50000) != LIBMARU_SUCCESS)
+         {
+            fuse_reply_err(req, EIO);
+            break;
+         }
+
+         maru_volume vol = LIBMARU_VOLUME_MUTE;
+         if (i > 0)
+            vol = (max * left + min * (100 - left)) / 100;
+
+         if (vol < min && i > 0)
+            vol = min;
+         else if (vol > max)
+            vol = max;
+
+         if (maru_stream_set_volume(g_ctx, LIBMARU_STREAM_MASTER, vol, 50000) != LIBMARU_SUCCESS)
+         {
+            fuse_reply_err(req, EIO);
+            break;
+         }
+
+         i = (left << 8) | left;
          IOCTL_RETURN(&i);
          break;
-#endif
+      }
 
-#ifdef SNDCTL_DSP_GETPLAYVOL
+      // We really want this no matter what ...
+#ifndef SNDCTL_DSP_GETPLAYVOL
+#define SNDCTL_DSP_GETPLAYVOL _SIOR('P', 24, int)
+#endif
       case SNDCTL_DSP_GETPLAYVOL:
          PREP_UARG_OUT(&i);
-         i = (100 << 8) | 100;
+
+         maru_volume cur, min, max;
+         if (maru_stream_get_volume(g_ctx, LIBMARU_STREAM_MASTER,
+                  &cur, &min, &max, 50000) != LIBMARU_SUCCESS)
+         {
+            fuse_reply_err(req, EIO);
+            break;
+         }
+
+         if (min >= max)
+            i = 100;
+         else if (cur < min)
+            i = 0;
+         else if (cur > max)
+            i = 100;
+         else
+            i = (100 * (cur - min)) / (max - min);
+
          IOCTL_RETURN(&i);
          break;
-#endif
 
 #ifdef SNDCTL_DSP_SETTRIGGER
       case SNDCTL_DSP_SETTRIGGER:
+         // No reason to care about this for now.
+         // Maybe when/if mmap() gets implemented.
          PREP_UARG_INOUT(&i, &i);
-         IOCTL_RETURN(&i); // No reason to care about this for now. Maybe when/if mmap() gets implemented.
+         IOCTL_RETURN(&i);
          break;
 #endif
 

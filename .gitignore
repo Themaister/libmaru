@@ -5,3 +5,4 @@
 *.dll
 /test/bin
 /cuse-maru/cuse-maru
+/cuse-maru/volume/cuse-volume

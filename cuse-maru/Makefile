@@ -1,6 +1,6 @@
 TARGET := cuse-maru
 
-CFLAGS += -O0 -g -pthread -std=gnu99 -Wall -I.. $(shell pkg-config libusb-1.0 fuse --cflags)
+CFLAGS += -O3 -g -pthread -std=gnu99 -Wall -I.. $(shell pkg-config libusb-1.0 fuse --cflags)
 LDFLAGS += -pthread $(shell pkg-config libusb-1.0 fuse --libs)
 
 SOURCES := $(wildcard *.c) $(wildcard ../*.c)

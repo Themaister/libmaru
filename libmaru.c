@@ -86,6 +86,13 @@ struct maru_context
 
    size_t epoll_wait_cnt;
    size_t libusb_call_cnt;
+
+   struct
+   {
+      unsigned chans;
+      unsigned channels[8];
+      unsigned feature_unit;
+   } volume;
 };
 
 struct usb_uas_format_descriptor
@@ -123,6 +130,7 @@ struct usb_uas_format_descriptor
 #define USB_REQUEST_UAC_GET_CUR        0x81
 #define USB_REQUEST_UAC_GET_MIN        0x82
 #define USB_REQUEST_UAC_GET_MAX        0x83
+#define USB_UAC_VOLUME_SELECTOR        0x02
 #define UAS_FREQ_CONTROL               0x01
 #define UAS_PITCH_CONTROL              0x02
 #define USB_REQUEST_DIR_MASK           0x80
@@ -1172,6 +1180,16 @@ static bool enumerate_streams(maru_context *ctx,
    return true;
 }
 
+static bool enumerate_controls(maru_context *ctx)
+{
+   // Actually parse the config descriptor later ...
+   ctx->volume.chans = 2;
+   ctx->volume.feature_unit = 13;
+   ctx->volume.channels[0] = 1;
+   ctx->volume.channels[1] = 2;
+   return true;
+}
+
 maru_error maru_create_context_from_vid_pid(maru_context **ctx,
       uint16_t vid, uint16_t pid,
       const struct maru_stream_desc *desc)
@@ -1213,6 +1231,9 @@ maru_error maru_create_context_from_vid_pid(maru_context **ctx,
       goto error;
 
    if (!enumerate_streams(context, desc))
+      goto error;
+
+   if (!enumerate_controls(context))
       goto error;
 
    if (!poll_list_init(context))
@@ -1580,16 +1601,25 @@ static int perform_pitch_request(maru_context *ctx,
 static maru_error perform_volume_request(maru_context *ctx,
       maru_volume *vol, uint8_t request, maru_usec timeout)
 {
+   if (ctx->volume.chans == 0)
+      return LIBMARU_ERROR_INVALID;
+
    uint16_t swapped = libusb_cpu_to_le16(*vol);
 
-   maru_error err = perform_request(ctx,
-         LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_DEVICE, request,
-         2 << 8, 0,
-         &swapped, sizeof(swapped), timeout);
+   for (unsigned i = 0; i < ctx->volume.chans; i++)
+   {
+      maru_error err = perform_request(ctx,
+            LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_INTERFACE, request,
+            (USB_UAC_VOLUME_SELECTOR << 8) | ctx->volume.channels[i],
+            (ctx->volume.feature_unit << 8) | ctx->control_interface,
+            &swapped, sizeof(swapped), timeout);
+
+      if (err != LIBMARU_SUCCESS)
+         return err;
+   }
 
    *vol = libusb_le16_to_cpu(swapped);
-
-   return err;
+   return LIBMARU_SUCCESS;
 }
 
 maru_error maru_stream_get_volume(maru_context *ctx,
