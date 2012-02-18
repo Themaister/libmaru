@@ -686,6 +686,8 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       case SNDCTL_DSP_SETPLAYVOL:
       {
          PREP_UARG_INOUT(&i, &i);
+         i &= 0xff;
+
          if (i > 100)
             i = 100;
          else if (i < 0)
@@ -695,6 +697,8 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          stream_info->volume = i;
          stream_info->volume_f = i / 100.0f;
          global_unlock();
+
+         i |= i << 8;
 
          IOCTL_RETURN(&i);
          break;
@@ -707,6 +711,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       case SNDCTL_DSP_GETPLAYVOL:
          PREP_UARG_OUT(&i);
          i = stream_info->volume;
+         i |= i << 8;
          IOCTL_RETURN(&i);
          break;
 
