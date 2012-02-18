@@ -17,6 +17,7 @@
 #include <assert.h>
 #include <pthread.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <samplerate.h>
 
@@ -49,6 +50,7 @@ struct stream_info
 
 static int g_dev;
 static int g_epfd;
+static int ping_fd;
 static pthread_mutex_t g_lock;
 static pthread_t g_thread;
 static struct stream_info g_stream_info[MAX_STREAMS];
@@ -131,6 +133,14 @@ static void mix_streams(const struct epoll_event *events, size_t num_events,
       memset(tmp_mix_buffer_f, 0, sizeof(tmp_mix_buffer_f));
 
       struct stream_info *info = events[i].data.ptr;
+
+      // We were pinged, clear eventfd.
+      if (!info)
+      {
+         uint64_t dummy;
+         eventfd_read(ping_fd, &dummy);
+         continue;
+      }
 
       if (info->fifo)
       {
@@ -324,6 +334,7 @@ static void reset_stream(struct stream_info *stream_info)
       return;
 
    epoll_ctl(g_epfd, EPOLL_CTL_DEL, maru_fifo_read_notify_fd(fifo), NULL);
+   eventfd_write(ping_fd, 1);
 
    global_lock();
    stream_info->fifo = NULL;
@@ -846,6 +857,18 @@ int main(int argc, char *argv[])
       perror("epoll_create");
       return 1;
    }
+
+   ping_fd = eventfd(0, 0);
+   if (ping_fd < 0)
+   {
+      perror("eventfd");
+      return 1;
+   }
+
+   epoll_ctl(g_epfd, EPOLL_CTL_ADD, ping_fd,
+         &(struct epoll_event) {
+            .events = POLLIN,
+         });
 
    if (pthread_mutex_init(&g_lock, NULL) < 0)
    {

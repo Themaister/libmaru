@@ -1,5 +1,7 @@
 TARGET := cuse-maru
 
+PREFIX = /usr/local
+
 CFLAGS += -O3 -g -pthread -std=gnu99 -Wall -I.. $(shell pkg-config libusb-1.0 fuse --cflags)
 LDFLAGS += -pthread $(shell pkg-config libusb-1.0 fuse --libs)
 
@@ -18,5 +20,8 @@ clean:
 	rm -f $(OBJECTS)
 	rm -f $(TARGETS)
 
-.PHONY: all clean
+install:
+	install -m755 $(TARGET) $(PREFIX)/bin
+
+.PHONY: all clean install
 

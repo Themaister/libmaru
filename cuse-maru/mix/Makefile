@@ -1,5 +1,7 @@
 TARGET := cuse-mix
 
+PREFIX = /usr/local
+
 CFLAGS += -O3 -g -pthread -std=gnu99 -Wall $(shell pkg-config fuse --cflags)
 LDFLAGS += -pthread $(shell pkg-config fuse --libs) -lsamplerate
 
@@ -18,5 +20,8 @@ clean:
 	rm -f $(OBJECTS)
 	rm -f $(TARGETS)
 
-.PHONY: all clean
+install:
+	install -m755 $(TARGET) $(PREFIX)/bin
+
+.PHONY: all clean install
 

@@ -1,5 +1,7 @@
 TARGET := cuse-volume
 
+PREFIX = /usr/local
+
 CFLAGS += -O3 -g -std=gnu99 -Wall
 
 SOURCES := $(wildcard *.c)
@@ -17,5 +19,8 @@ clean:
 	rm -f $(OBJECTS)
 	rm -f $(TARGETS)
 
-.PHONY: all clean
+install:
+	install -m755 $(TARGET) $(PREFIX)/bin
+
+.PHONY: all clean install
 
