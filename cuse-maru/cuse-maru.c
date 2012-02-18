@@ -576,7 +576,7 @@ struct maru_param
    char *dev_name;
 };
 
-static const struct fuse_opt ross_opts[] = {
+static const struct fuse_opt maru_opts[] = {
    MARU_OPT("-M %u", major),
    MARU_OPT("--maj=%u", major),
    MARU_OPT("-m %u", minor),
@@ -627,7 +627,7 @@ int main(int argc, char *argv[])
    char dev_name[128] = {0};
    const char *dev_info_argv[] = { dev_name };
 
-   if (fuse_opt_parse(&args, &param, ross_opts, process_arg))
+   if (fuse_opt_parse(&args, &param, maru_opts, process_arg))
    {
       fprintf(stderr, "Failed to parse ...\n");
       return 1;

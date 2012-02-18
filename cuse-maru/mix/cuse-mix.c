@@ -18,6 +18,7 @@
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
+#include <samplerate.h>
 
 #define MAX_STREAMS 16
 
@@ -37,8 +38,13 @@ struct stream_info
    uint64_t write_cnt;
 
    int volume;
+   float volume_f;
 
    bool nonblock;
+
+   SRC_STATE *src;
+   float *src_data_f;
+   int16_t *src_data_i;
 };
 
 static int g_dev;
@@ -63,8 +69,18 @@ static inline void global_unlock(void)
    pthread_mutex_unlock(&g_lock);
 }
 
+#define HW_FRAGS 4
+#define HW_FRAGSHIFT 11
+
 static bool set_hw_formats(void)
 {
+   int frag = (HW_FRAGS << 16) | HW_FRAGSHIFT;
+   if (ioctl(g_dev, SNDCTL_DSP_SETFRAGMENT, &frag) < 0)
+   {
+      perror("ioctl");
+      return false;
+   }
+
    if (ioctl(g_dev, SNDCTL_DSP_GETBLKSIZE, &g_fragsize) < 0)
    {
       perror("ioctl");
@@ -97,37 +113,49 @@ static bool set_hw_formats(void)
 }
 
 static void mix_streams(const struct epoll_event *events, size_t num_events,
-      int16_t *mix_buffer, int16_t *tmp_mix_buffer, size_t fragsize)
+      int16_t *mix_buffer,
+      size_t fragsize)
 {
-   memset(mix_buffer, 0, fragsize);
+   size_t samples = fragsize / (g_bits / 8);
 
-   unsigned samples = fragsize / (g_bits / 8);
+   float tmp_mix_buffer_f[samples];
+   int16_t tmp_mix_buffer_i[samples];
+
+   float mix_buffer_f[samples];
+
+   memset(mix_buffer_f, 0, sizeof(mix_buffer_f));
 
    global_lock();
    for (unsigned i = 0; i < num_events; i++)
    {
-      memset(tmp_mix_buffer, 0, fragsize);
+      memset(tmp_mix_buffer_f, 0, sizeof(tmp_mix_buffer_f));
 
       struct stream_info *info = events[i].data.ptr;
 
       if (info->fifo)
       {
-         maru_fifo_read(info->fifo, tmp_mix_buffer, fragsize);
+         if (info->src)
+         {
+            src_callback_read(info->src,
+                  (double)g_sample_rate / info->sample_rate,
+                  samples / info->channels,
+                  tmp_mix_buffer_f);
+         }
+         else
+         {
+            maru_fifo_read(info->fifo, tmp_mix_buffer_i, fragsize);
+            src_short_to_float_array(tmp_mix_buffer_i, tmp_mix_buffer_f, samples);
+         }
+
          maru_fifo_read_notify_ack(info->fifo);
       }
 
-      for (unsigned i = 0; i < samples; i++)
-      {
-         int32_t res = mix_buffer[i] + tmp_mix_buffer[i];
-         if (res > 0x7fff)
-            res = 0x7fff;
-         else if (res < -0x8000)
-            res = -0x8000;
-
-         mix_buffer[i] = (int16_t)res;
-      }
+      for (size_t i = 0; i < samples; i++)
+         mix_buffer_f[i] += tmp_mix_buffer_f[i] * info->volume_f;
    }
    global_unlock();
+
+   src_float_to_short_array(mix_buffer_f, mix_buffer, samples);
 }
 
 static bool write_all(int fd, const void *data_, size_t size)
@@ -147,19 +175,26 @@ static bool write_all(int fd, const void *data_, size_t size)
    return true;
 }
 
+long src_callback(void *cb_data, float **data)
+{
+   struct stream_info *info = cb_data;
+
+   memset(info->src_data_i, 0, info->fragsize);
+   maru_fifo_read(info->fifo, info->src_data_i, info->fragsize);
+
+   src_short_to_float_array(info->src_data_i, info->src_data_f,
+         info->fragsize / sizeof(int16_t));
+
+   *data = info->src_data_f;
+   return info->fragsize / (info->channels * info->bits / 8);
+}
+
 static void *thread_entry(void *data)
 {
    (void)data;
 
-   if (!set_hw_formats())
-   {
-      fprintf(stderr, "Cannot set HW formats ...\n");
-      exit(1);
-   }
-
    int16_t *mix_buffer = malloc(g_fragsize);
-   int16_t *tmp_mix_buffer = malloc(g_fragsize);
-   if (!mix_buffer || !tmp_mix_buffer)
+   if (!mix_buffer)
    {
       fprintf(stderr, "Failed to allocate mixbuffer\n");
       exit(1);
@@ -181,7 +216,7 @@ poll_retry:
          exit(1);
       }
 
-      mix_streams(events, ret, mix_buffer, tmp_mix_buffer, g_fragsize);
+      mix_streams(events, ret, mix_buffer, g_fragsize);
 
       if (!write_all(g_dev, mix_buffer, g_fragsize))
       {
@@ -193,7 +228,6 @@ poll_retry:
    }
 
    free(mix_buffer);
-   free(tmp_mix_buffer);
    return NULL;
 }
 
@@ -228,13 +262,12 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
 
    struct stream_info *stream_info = &g_stream_info[info->fh];
 
-   // Just set some defaults
-   stream_info->sample_rate = 48000;
-   stream_info->channels = 2;
-   stream_info->bits = 16;
+   stream_info->sample_rate = g_sample_rate;
+   stream_info->channels = g_channels;
+   stream_info->bits = g_bits;
 
    stream_info->fragsize = 4096;
-   stream_info->frags = 8;
+   stream_info->frags = 4;
 
    info->nonseekable = 1;
    info->direct_io = 1;
@@ -246,6 +279,24 @@ static bool init_stream(struct stream_info *stream_info)
    maru_fifo *fifo = maru_fifo_new(stream_info->frags * stream_info->fragsize);
    if (!fifo)
       return false;
+
+   if (stream_info->sample_rate != g_sample_rate)
+   {
+      stream_info->src_data_f = malloc(stream_info->fragsize * sizeof(float) / sizeof(int16_t));
+      stream_info->src_data_i = malloc(stream_info->fragsize);
+      assert(stream_info->src_data_f);
+      assert(stream_info->src_data_i);
+
+      stream_info->src = src_callback_new(src_callback,
+            SRC_SINC_FASTEST, stream_info->channels, NULL, stream_info);
+
+      if (!stream_info->src)
+      {
+         fprintf(stderr, "Failed to init samplerate ...\n");
+         maru_fifo_free(fifo);
+         return false;
+      }
+   }
 
    int ret = epoll_ctl(g_epfd, EPOLL_CTL_ADD, maru_fifo_read_notify_fd(fifo),
          &(struct epoll_event) {
@@ -260,6 +311,8 @@ static bool init_stream(struct stream_info *stream_info)
 
    global_lock();
    stream_info->fifo = fifo;
+   stream_info->volume = 100;
+   stream_info->volume_f = 1.0f;
    global_unlock();
    return true;
 }
@@ -267,16 +320,27 @@ static bool init_stream(struct stream_info *stream_info)
 static void reset_stream(struct stream_info *stream_info)
 {
    maru_fifo *fifo = stream_info->fifo;
-   if (fifo)
+   if (!fifo)
+      return;
+
+   epoll_ctl(g_epfd, EPOLL_CTL_DEL, maru_fifo_read_notify_fd(fifo), NULL);
+
+   global_lock();
+   stream_info->fifo = NULL;
+   global_unlock();
+
+   if (stream_info->src)
    {
-      epoll_ctl(g_epfd, EPOLL_CTL_DEL, maru_fifo_read_notify_fd(fifo), NULL);
+      src_delete(stream_info->src);
+      stream_info->src = NULL;
 
-      global_lock();
-      stream_info->fifo = NULL;
-      global_unlock();
-
-      maru_fifo_free(fifo);
+      free(stream_info->src_data_f);
+      free(stream_info->src_data_i);
+      stream_info->src_data_f = NULL;
+      stream_info->src_data_i = NULL;
    }
+
+   maru_fifo_free(fifo);
 }
 
 static void maru_write(fuse_req_t req, const char *data, size_t size,
@@ -432,7 +496,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_GETCAPS
       case SNDCTL_DSP_GETCAPS:
          PREP_UARG_OUT(&i);
-         i = DSP_CAP_REALTIME | DSP_CAP_MULTI;
+         i = DSP_CAP_REALTIME | DSP_CAP_MULTI | DSP_CAP_BATCH;
          IOCTL_RETURN(&i);
          break;
 #endif
@@ -451,7 +515,14 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_SPEED
       case SNDCTL_DSP_SPEED:
          PREP_UARG_INOUT(&i, &i);
-         i = stream_info->sample_rate; // Hack for now.
+
+         if (stream_info->fifo)
+         {
+            fuse_reply_err(req, EINVAL);
+            break;
+         }
+
+         stream_info->sample_rate = i;
          IOCTL_RETURN(&i);
          break;
 #endif
@@ -571,11 +642,26 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       }
 #endif
 
-         // Dummy
 #ifdef SNDCTL_DSP_SYNC
       case SNDCTL_DSP_SYNC:
+      {
+         if (ioctl(g_dev, SNDCTL_DSP_GETODELAY, &i) < 0)
+         {
+            fuse_reply_err(req, EINVAL);
+            break;
+         }
+
+         i = i * stream_info->sample_rate / g_sample_rate;
+
+         if (stream_info->fifo)
+            i += maru_fifo_buffered_size(stream_info->fifo);
+
+         uint64_t usec = (i * UINT64_C(1000000)) / (stream_info->sample_rate * stream_info->channels * stream_info->bits / 8);
+         usleep(usec);
+
          IOCTL_RETURN_NULL();
          break;
+      }
 #endif
 
 #ifdef SNDCTL_DSP_GETOPTR
@@ -607,6 +693,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 
          global_lock();
          stream_info->volume = i;
+         stream_info->volume_f = i / 100.0f;
          global_unlock();
 
          IOCTL_RETURN(&i);
@@ -665,7 +752,7 @@ struct maru_param
    char *sink_name;
 };
 
-static const struct fuse_opt ross_opts[] = {
+static const struct fuse_opt maru_opts[] = {
    MARU_OPT("-M %u", major),
    MARU_OPT("--maj=%u", major),
    MARU_OPT("-m %u", minor),
@@ -718,7 +805,7 @@ int main(int argc, char *argv[])
    char dev_name[128] = {0};
    const char *dev_info_argv[] = { dev_name };
 
-   if (fuse_opt_parse(&args, &param, ross_opts, process_arg))
+   if (fuse_opt_parse(&args, &param, maru_opts, process_arg))
    {
       fprintf(stderr, "Failed to parse ...\n");
       return 1;
@@ -739,6 +826,12 @@ int main(int argc, char *argv[])
    if (g_dev < 0)
    {
       perror("open");
+      return 1;
+   }
+
+   if (!set_hw_formats())
+   {
+      fprintf(stderr, "Cannot set HW formats ...\n");
       return 1;
    }
 
