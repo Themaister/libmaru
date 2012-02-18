@@ -108,6 +108,29 @@ struct usb_uas_format_descriptor
    uint8_t tSamFreq[];
 } __attribute__((packed));
 
+struct usb_uac_output_terminal_descriptor
+{
+   uint8_t  bLength;
+   uint8_t  bDescriptorType;
+   uint8_t  bDescriptorSubtype;
+   uint8_t  bTerminalID;
+   uint16_t wTerminalType;
+   uint8_t  bAssocTerminal;
+   uint8_t  bSourceID;
+   uint8_t  iTerminal;
+} __attribute__((packed));
+
+struct usb_uac_feature_unit_descriptor
+{
+   uint8_t bLength;
+   uint8_t bDescriptorType;
+   uint8_t bDescriptorSubtype;
+   uint8_t bUnitID;
+   uint8_t bSourceID;
+   uint8_t bControlSize;
+   uint8_t bmaControls[];
+} __attribute__((packed));
+
 #define USB_CLASS_AUDIO                1
 #define USB_SUBCLASS_AUDIO_CONTROL     1
 #define USB_SUBCLASS_AUDIO_STREAMING   2
@@ -134,6 +157,9 @@ struct usb_uas_format_descriptor
 #define UAS_FREQ_CONTROL               0x01
 #define UAS_PITCH_CONTROL              0x02
 #define USB_REQUEST_DIR_MASK           0x80
+#define UAC_TYPE_SPEAKER               0x0301
+#define UAC_OUTPUT_TERMINAL            0x03
+#define UAC_FEATURE_UNIT               0x06
 
 struct maru_control_request
 {
@@ -1180,13 +1206,82 @@ static bool enumerate_streams(maru_context *ctx,
    return true;
 }
 
+static struct usb_uac_feature_unit_descriptor*
+find_volume_feature_unit(const uint8_t *extra, size_t extra_length)
+{
+   int id = -1;
+   struct usb_uac_output_terminal_descriptor *desc = NULL;
+
+   // Find output terminal that maps to a speaker, and see if the last
+   // unit in the chain is a feature unit with volume controls.
+   for (size_t i = 0; i < extra_length; i += desc->bLength)
+   {
+      desc = (struct usb_uac_output_terminal_descriptor*)&extra[i];
+
+      if (desc->bLength != sizeof(*desc))
+         continue;
+
+      if (desc->bDescriptorSubtype == UAC_OUTPUT_TERMINAL &&
+            desc->wTerminalType == UAC_TYPE_SPEAKER)
+      {
+         id = desc->bSourceID;
+         break;
+      }
+   }
+
+   if (id < 0)
+   {
+      fprintf(stderr, "Didn't find speaker ...\n");
+      return NULL;
+   }
+
+   struct usb_uac_feature_unit_descriptor *feature = NULL;
+
+   for (size_t i = 0; i < extra_length; i += feature->bLength)
+   {
+      feature = (struct usb_uac_feature_unit_descriptor*)&extra[i];
+
+      if (feature->bLength < sizeof(*feature))
+         continue;
+
+      if (feature->bDescriptorSubtype == UAC_FEATURE_UNIT &&
+            feature->bUnitID == id &&
+            feature->bControlSize)
+         return feature;
+   }
+
+   return NULL;
+}
+
 static bool enumerate_controls(maru_context *ctx)
 {
-   // Actually parse the config descriptor later ...
-   ctx->volume.chans = 2;
-   ctx->volume.feature_unit = 13;
-   ctx->volume.channels[0] = 1;
-   ctx->volume.channels[1] = 2;
+   const struct libusb_interface_descriptor *desc = &ctx->conf->interface[ctx->control_interface].altsetting[0];
+
+   struct usb_uac_feature_unit_descriptor *feature =
+      find_volume_feature_unit(desc->extra, desc->extra_length);
+
+   if (!feature)
+      return false;
+
+   ctx->volume.feature_unit = feature->bUnitID;
+
+   unsigned control_len = feature->bLength - 7;
+
+   // Find the two first channels that have volume control, and assume they map to left/right.
+   for (unsigned i = 0; i < control_len && ctx->volume.chans < 2; i += feature->bControlSize)
+   {
+      if (feature->bmaControls[i] & USB_UAC_VOLUME_SELECTOR)
+         ctx->volume.channels[ctx->volume.chans++] = i / feature->bControlSize;
+   }
+
+#if 0
+   fprintf(stderr, "Enumerated controls:\n");
+   fprintf(stderr, "\tUnit: %u\n", ctx->volume.feature_unit);
+   fprintf(stderr, "\tChans: %u\n", ctx->volume.chans);
+   for (unsigned i = 0; i < ctx->volume.chans; i++)
+      fprintf(stderr, "\t\tChan #%u: %u\n", i, ctx->volume.channels[i]);
+#endif
+
    return true;
 }
 
