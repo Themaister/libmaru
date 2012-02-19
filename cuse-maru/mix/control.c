@@ -128,6 +128,33 @@ static void request_getplayvol(int fd, int argc, char *argv[])
    request_reply(fd, vol);
 }
 
+static void request_getname(int fd, int argc, char *argv[])
+{
+   if (argc < 1)
+   {
+      fprintf(stderr, "Invalid request!\n");
+      close(fd);
+      return;
+   }
+
+   errno = 0;
+   unsigned stream = strtoul(argv[0], NULL, 0);
+   if (errno)
+      return request_reply(fd, "NAK");
+
+   if (stream >= MAX_STREAMS)
+      return request_reply(fd, "NAK");
+
+   char process[256] = "";
+
+   global_lock();
+   if (g_state.stream_info[stream].active)
+      strncpy(process, g_state.stream_info[stream].process_name, sizeof(process));
+   global_unlock();
+
+   request_reply(fd, process);
+}
+
 static void parse_request(int fd, int argc, char *argv[])
 {
 #if 0
@@ -147,6 +174,8 @@ static void parse_request(int fd, int argc, char *argv[])
       request_setplayvol(fd, argc - 1, argv + 1);
    else if (strcmp(argv[0], "GETPLAYVOL") == 0)
       request_getplayvol(fd, argc - 1, argv + 1);
+   else if (strcmp(argv[0], "GETNAME") == 0)
+      request_getname(fd, argc - 1, argv + 1);
    else
    {
       fprintf(stderr, "Invalid request!\n");

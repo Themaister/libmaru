@@ -23,6 +23,7 @@
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <samplerate.h>
+#include <limits.h>
 
 struct global g_state;
 
@@ -37,7 +38,7 @@ void global_unlock(void)
 }
 
 #define HW_FRAGS 4
-#define HW_FRAGSHIFT 11
+#define HW_FRAGSHIFT 12
 
 static bool set_hw_formats(void)
 {
@@ -77,6 +78,28 @@ static bool set_hw_formats(void)
    }
 
    return true;
+}
+
+static void get_process_name(char *name, size_t size, pid_t pid)
+{
+   if (size == 0)
+      return;
+
+   char proc_path[PATH_MAX];
+   snprintf(proc_path, sizeof(proc_path), "/proc/%lu/cmdline", (unsigned long)pid);
+   int fd = open(proc_path, O_RDONLY);
+   if (fd < 0)
+   {
+      snprintf(name, size, "Unknown");
+      return;
+   }
+
+   ssize_t ret = read(fd, name, size - 1);
+   if (ret < 0)
+      ret = 0;
+
+   name[ret] = '\0';
+   close(fd);
 }
 
 static void maru_open(fuse_req_t req, struct fuse_file_info *info)
@@ -119,6 +142,14 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
 
    info->nonseekable = 1;
    info->direct_io = 1;
+
+   const struct fuse_ctx *ctx = fuse_req_ctx(req);
+   if (ctx)
+   {
+      get_process_name(stream_info->process_name,
+            sizeof(stream_info->process_name), ctx->pid);
+   }
+
    fuse_reply_open(req, info);
 }
 

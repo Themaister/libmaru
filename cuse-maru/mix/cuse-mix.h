@@ -10,6 +10,7 @@ struct stream_info
 {
    bool active;
    maru_fifo *fifo;
+   char process_name[256];
 
    struct fuse_pollhandle *ph;
 
