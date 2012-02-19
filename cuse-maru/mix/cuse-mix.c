@@ -684,7 +684,6 @@ static bool init_cuse_mix(const char *sink_name)
             .events = POLLIN,
          });
 
-
    if (pthread_mutex_init(&g_state.lock, NULL) < 0)
    {
       perror("pthread_mutex_init");
@@ -692,6 +691,9 @@ static bool init_cuse_mix(const char *sink_name)
    }
 
    if (!start_mix_thread())
+      return false;
+
+   if (!start_control_thread())
       return false;
 
    return true;
