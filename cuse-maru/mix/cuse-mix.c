@@ -1,4 +1,6 @@
 #include "../../fifo.h"
+#include "cuse-mix.h"
+#include "mixthread.h"
 
 #include <sys/soundcard.h>
 #include <cuse_lowlevel.h>
@@ -21,54 +23,16 @@
 #include <sys/ioctl.h>
 #include <samplerate.h>
 
-#define MAX_STREAMS 16
+struct global g_state;
 
-struct stream_info
+void global_lock(void)
 {
-   bool active;
-   maru_fifo *fifo;
-
-   struct fuse_pollhandle *ph;
-
-   int sample_rate;
-   int channels;
-   int bits;
-
-   int frags;
-   int fragsize;
-   uint64_t write_cnt;
-
-   int volume;
-   float volume_f;
-
-   bool nonblock;
-
-   SRC_STATE *src;
-   float *src_data_f;
-   int16_t *src_data_i;
-};
-
-static int g_dev;
-static int g_epfd;
-static int ping_fd;
-static pthread_mutex_t g_lock;
-static pthread_t g_thread;
-static struct stream_info g_stream_info[MAX_STREAMS];
-
-static int g_fragsize;
-static int g_sample_rate;
-static int g_channels;
-static int g_bits;
-static int g_format;
-
-static inline void global_lock(void)
-{
-   pthread_mutex_lock(&g_lock);
+   pthread_mutex_lock(&g_state.lock);
 }
 
-static inline void global_unlock(void)
+void global_unlock(void)
 {
-   pthread_mutex_unlock(&g_lock);
+   pthread_mutex_unlock(&g_state.lock);
 }
 
 #define HW_FRAGS 4
@@ -77,168 +41,41 @@ static inline void global_unlock(void)
 static bool set_hw_formats(void)
 {
    int frag = (HW_FRAGS << 16) | HW_FRAGSHIFT;
-   if (ioctl(g_dev, SNDCTL_DSP_SETFRAGMENT, &frag) < 0)
+   if (ioctl(g_state.dev, SNDCTL_DSP_SETFRAGMENT, &frag) < 0)
    {
       perror("ioctl");
       return false;
    }
 
-   if (ioctl(g_dev, SNDCTL_DSP_GETBLKSIZE, &g_fragsize) < 0)
+   if (ioctl(g_state.dev, SNDCTL_DSP_GETBLKSIZE, &g_state.format.fragsize) < 0)
    {
       perror("ioctl");
       return false;
    }
 
-   g_sample_rate = 48000;
-   if (ioctl(g_dev, SNDCTL_DSP_SPEED, &g_sample_rate) < 0)
+   g_state.format.sample_rate = 48000;
+   if (ioctl(g_state.dev, SNDCTL_DSP_SPEED, &g_state.format.sample_rate) < 0)
    {
       perror("ioctl");
       return false;
    }
 
-   g_channels = 2;
-   if (ioctl(g_dev, SNDCTL_DSP_CHANNELS, &g_channels) < 0)
+   g_state.format.channels = 2;
+   if (ioctl(g_state.dev, SNDCTL_DSP_CHANNELS, &g_state.format.channels) < 0)
    {
       perror("ioctl");
       return false;
    }
 
-   g_bits = 16;
-   g_format = AFMT_S16_LE;
-   if (ioctl(g_dev, SNDCTL_DSP_SETFMT, &g_format) < 0)
+   g_state.format.bits = 16;
+   g_state.format.format = AFMT_S16_LE;
+   if (ioctl(g_state.dev, SNDCTL_DSP_SETFMT, &g_state.format.format) < 0)
    {
       perror("ioctl");
       return false;
    }
 
    return true;
-}
-
-static void mix_streams(const struct epoll_event *events, size_t num_events,
-      int16_t *mix_buffer,
-      size_t fragsize)
-{
-   size_t samples = fragsize / (g_bits / 8);
-
-   float tmp_mix_buffer_f[samples];
-   int16_t tmp_mix_buffer_i[samples];
-
-   float mix_buffer_f[samples];
-
-   memset(mix_buffer_f, 0, sizeof(mix_buffer_f));
-
-   global_lock();
-   for (unsigned i = 0; i < num_events; i++)
-   {
-      memset(tmp_mix_buffer_f, 0, sizeof(tmp_mix_buffer_f));
-
-      struct stream_info *info = events[i].data.ptr;
-
-      // We were pinged, clear eventfd.
-      if (!info)
-      {
-         uint64_t dummy;
-         eventfd_read(ping_fd, &dummy);
-         continue;
-      }
-
-      if (info->fifo)
-      {
-         if (info->src)
-         {
-            src_callback_read(info->src,
-                  (double)g_sample_rate / info->sample_rate,
-                  samples / info->channels,
-                  tmp_mix_buffer_f);
-         }
-         else
-         {
-            maru_fifo_read(info->fifo, tmp_mix_buffer_i, fragsize);
-            src_short_to_float_array(tmp_mix_buffer_i, tmp_mix_buffer_f, samples);
-         }
-
-         maru_fifo_read_notify_ack(info->fifo);
-      }
-
-      for (size_t i = 0; i < samples; i++)
-         mix_buffer_f[i] += tmp_mix_buffer_f[i] * info->volume_f;
-   }
-   global_unlock();
-
-   src_float_to_short_array(mix_buffer_f, mix_buffer, samples);
-}
-
-static bool write_all(int fd, const void *data_, size_t size)
-{
-   const uint8_t *data = data_;
-
-   while (size)
-   {
-      ssize_t ret = write(fd, data, size);
-      if (ret <= 0)
-         return false;
-
-      data += ret;
-      size -= ret;
-   }
-
-   return true;
-}
-
-long src_callback(void *cb_data, float **data)
-{
-   struct stream_info *info = cb_data;
-
-   memset(info->src_data_i, 0, info->fragsize);
-   maru_fifo_read(info->fifo, info->src_data_i, info->fragsize);
-
-   src_short_to_float_array(info->src_data_i, info->src_data_f,
-         info->fragsize / sizeof(int16_t));
-
-   *data = info->src_data_f;
-   return info->fragsize / (info->channels * info->bits / 8);
-}
-
-static void *thread_entry(void *data)
-{
-   (void)data;
-
-   int16_t *mix_buffer = malloc(g_fragsize);
-   if (!mix_buffer)
-   {
-      fprintf(stderr, "Failed to allocate mixbuffer\n");
-      exit(1);
-   }
-
-   for (;;)
-   {
-      struct epoll_event events[MAX_STREAMS];
-
-      int ret;
-poll_retry:
-      ret = epoll_wait(g_epfd, events, MAX_STREAMS, -1);
-      if (ret < 0)
-      {
-         if (errno == EINTR)
-            goto poll_retry;
-
-         perror("epoll_wait");
-         exit(1);
-      }
-
-      mix_streams(events, ret, mix_buffer, g_fragsize);
-
-      if (!write_all(g_dev, mix_buffer, g_fragsize))
-      {
-         fprintf(stderr, "write_all failed!\n");
-         exit(1);
-      }
-
-      memset(mix_buffer, 0, g_fragsize);
-   }
-
-   free(mix_buffer);
-   return NULL;
 }
 
 static void maru_open(fuse_req_t req, struct fuse_file_info *info)
@@ -254,9 +91,9 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
    global_lock();
    for (unsigned i = 0; i < MAX_STREAMS; i++)
    {
-      if (!g_stream_info[i].active)
+      if (!g_state.stream_info[i].active)
       {
-         g_stream_info[i].active = true;
+         g_state.stream_info[i].active = true;
          info->fh = i;
          found = true;
          break;
@@ -270,11 +107,11 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
       return;
    }
 
-   struct stream_info *stream_info = &g_stream_info[info->fh];
+   struct stream_info *stream_info = &g_state.stream_info[info->fh];
 
-   stream_info->sample_rate = g_sample_rate;
-   stream_info->channels = g_channels;
-   stream_info->bits = g_bits;
+   stream_info->sample_rate = g_state.format.sample_rate;
+   stream_info->channels = g_state.format.channels;
+   stream_info->bits = g_state.format.bits;
 
    stream_info->fragsize = 4096;
    stream_info->frags = 4;
@@ -290,7 +127,7 @@ static bool init_stream(struct stream_info *stream_info)
    if (!fifo)
       return false;
 
-   if (stream_info->sample_rate != g_sample_rate)
+   if (stream_info->sample_rate != g_state.format.sample_rate)
    {
       stream_info->src_data_f = malloc(stream_info->fragsize * sizeof(float) / sizeof(int16_t));
       stream_info->src_data_i = malloc(stream_info->fragsize);
@@ -308,7 +145,7 @@ static bool init_stream(struct stream_info *stream_info)
       }
    }
 
-   int ret = epoll_ctl(g_epfd, EPOLL_CTL_ADD, maru_fifo_read_notify_fd(fifo),
+   int ret = epoll_ctl(g_state.epfd, EPOLL_CTL_ADD, maru_fifo_read_notify_fd(fifo),
          &(struct epoll_event) {
             .events = POLLIN,
             .data = {
@@ -333,8 +170,8 @@ static void reset_stream(struct stream_info *stream_info)
    if (!fifo)
       return;
 
-   epoll_ctl(g_epfd, EPOLL_CTL_DEL, maru_fifo_read_notify_fd(fifo), NULL);
-   eventfd_write(ping_fd, 1);
+   epoll_ctl(g_state.epfd, EPOLL_CTL_DEL, maru_fifo_read_notify_fd(fifo), NULL);
+   eventfd_write(g_state.ping_fd, 1);
 
    global_lock();
    stream_info->fifo = NULL;
@@ -357,7 +194,7 @@ static void reset_stream(struct stream_info *stream_info)
 static void maru_write(fuse_req_t req, const char *data, size_t size,
       off_t off, struct fuse_file_info *info)
 {
-   struct stream_info *stream_info = &g_stream_info[info->fh];
+   struct stream_info *stream_info = &g_state.stream_info[info->fh];
 
    if (!stream_info->fifo && !init_stream(stream_info))
    {
@@ -391,7 +228,7 @@ static void maru_update_pollhandle(struct stream_info *info, struct fuse_pollhan
 static void maru_poll(fuse_req_t req, struct fuse_file_info *info,
       struct fuse_pollhandle *ph)
 {
-   struct stream_info *stream_info = &g_stream_info[info->fh];
+   struct stream_info *stream_info = &g_state.stream_info[info->fh];
 
    global_lock();
    maru_update_pollhandle(stream_info, ph);
@@ -475,7 +312,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       struct fuse_file_info *info, unsigned flags,
       const void *in_buf, size_t in_bufsize, size_t out_bufsize)
 {
-   struct stream_info *stream_info = &g_stream_info[info->fh];
+   struct stream_info *stream_info = &g_state.stream_info[info->fh];
 
    unsigned cmd = signed_cmd;
    int i = 0;
@@ -636,14 +473,14 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       {
          PREP_UARG_OUT(&i);
 
-         if (ioctl(g_dev, SNDCTL_DSP_GETODELAY, &i) < 0)
+         if (ioctl(g_state.dev, SNDCTL_DSP_GETODELAY, &i) < 0)
          {
             fuse_reply_err(req, EINVAL);
             break;
          }
 
          // Compensate for possibly different sample rates.
-         i = i * stream_info->sample_rate / g_sample_rate;
+         i = i * stream_info->sample_rate / g_state.format.sample_rate;
 
          if (stream_info->fifo)
             i += maru_fifo_buffered_size(stream_info->fifo);
@@ -656,13 +493,13 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_SYNC
       case SNDCTL_DSP_SYNC:
       {
-         if (ioctl(g_dev, SNDCTL_DSP_GETODELAY, &i) < 0)
+         if (ioctl(g_state.dev, SNDCTL_DSP_GETODELAY, &i) < 0)
          {
             fuse_reply_err(req, EINVAL);
             break;
          }
 
-         i = i * stream_info->sample_rate / g_sample_rate;
+         i = i * stream_info->sample_rate / g_state.format.sample_rate;
 
          if (stream_info->fifo)
             i += maru_fifo_buffered_size(stream_info->fifo);
@@ -748,7 +585,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 
 static void maru_release(fuse_req_t req, struct fuse_file_info *info)
 {
-   struct stream_info *stream_info = &g_stream_info[info->fh];
+   struct stream_info *stream_info = &g_state.stream_info[info->fh];
 
    reset_stream(stream_info);
 
@@ -813,6 +650,53 @@ static const struct cuse_lowlevel_ops maru_op = {
    .release = maru_release,
 };
 
+static bool init_cuse_mix(const char *sink_name)
+{
+   g_state.dev = open(sink_name, O_WRONLY);
+   if (g_state.dev < 0)
+   {
+      perror("open");
+      return false;
+   }
+
+   if (!set_hw_formats())
+   {
+      fprintf(stderr, "Cannot set HW formats ...\n");
+      return false;
+   }
+
+   g_state.epfd = epoll_create(MAX_STREAMS);
+   if (g_state.epfd < 0)
+   {
+      perror("epoll_create");
+      return false;
+   }
+
+   g_state.ping_fd = eventfd(0, 0);
+   if (g_state.ping_fd < 0)
+   {
+      perror("eventfd");
+      return false;
+   }
+
+   epoll_ctl(g_state.epfd, EPOLL_CTL_ADD, g_state.ping_fd,
+         &(struct epoll_event) {
+            .events = POLLIN,
+         });
+
+
+   if (pthread_mutex_init(&g_state.lock, NULL) < 0)
+   {
+      perror("pthread_mutex_init");
+      return false;
+   }
+
+   if (!start_mix_thread())
+      return false;
+
+   return true;
+}
+
 int main(int argc, char *argv[])
 {
    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
@@ -838,49 +722,8 @@ int main(int argc, char *argv[])
       .flags = CUSE_UNRESTRICTED_IOCTL,
    };
 
-   g_dev = open(param.sink_name ? param.sink_name : "/dev/maru", O_WRONLY);
-   if (g_dev < 0)
-   {
-      perror("open");
+   if (!init_cuse_mix(param.sink_name ? param.sink_name : "/dev/maru"))
       return 1;
-   }
-
-   if (!set_hw_formats())
-   {
-      fprintf(stderr, "Cannot set HW formats ...\n");
-      return 1;
-   }
-
-   g_epfd = epoll_create(MAX_STREAMS);
-   if (g_epfd < 0)
-   {
-      perror("epoll_create");
-      return 1;
-   }
-
-   ping_fd = eventfd(0, 0);
-   if (ping_fd < 0)
-   {
-      perror("eventfd");
-      return 1;
-   }
-
-   epoll_ctl(g_epfd, EPOLL_CTL_ADD, ping_fd,
-         &(struct epoll_event) {
-            .events = POLLIN,
-         });
-
-   if (pthread_mutex_init(&g_lock, NULL) < 0)
-   {
-      perror("pthread_mutex_init");
-      return 1;
-   }
-
-   if (pthread_create(&g_thread, NULL, thread_entry, NULL) < 0)
-   {
-      perror("pthread_create");
-      return 1;
-   }
 
    return cuse_lowlevel_main(args.argc, args.argv, &ci, &maru_op, NULL);
 }
