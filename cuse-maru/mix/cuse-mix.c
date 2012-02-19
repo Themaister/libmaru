@@ -266,7 +266,7 @@ static void maru_poll(fuse_req_t req, struct fuse_file_info *info,
    maru_update_pollhandle(stream_info, ph);
    global_unlock();
 
-   if (!stream_info->fifo || maru_fifo_write_avail(stream_info->fifo))
+   if (!stream_info->fifo || maru_fifo_write_avail(stream_info->fifo) >= stream_info->fragsize)
       fuse_reply_poll(req, POLLOUT);
    else
       fuse_reply_poll(req, 0);

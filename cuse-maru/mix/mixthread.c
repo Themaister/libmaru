@@ -111,21 +111,39 @@ static void *thread_entry(void *data)
    int16_t *mix_buffer = malloc(g_state.format.fragsize);
    if (!mix_buffer)
    {
-      fprintf(stderr, "Failed to allocate mixbuffer\n");
+      fprintf(stderr, "Failed to allocate mixbuffer.\n");
       exit(1);
    }
 
    for (;;)
    {
+      // Wait as long as possible before we poll FIFOs.
+      struct pollfd fds = { .fd = g_state.dev, .events = POLLOUT };
+      if (poll(&fds, 1, -1) < 0)
+      {
+         if (errno == EINTR)
+            continue;
+
+         perror("poll");
+         exit(1);
+      }
+
+      if (fds.revents & (POLLHUP | POLLERR | POLLNVAL))
+      {
+         fprintf(stderr, "Sink is dead!\n");
+         exit(1);
+      }
+
+      if (!(fds.revents & POLLOUT))
+         continue;
+
       struct epoll_event events[MAX_STREAMS];
 
-      int ret;
-poll_retry:
-      ret = epoll_wait(g_state.epfd, events, MAX_STREAMS, -1);
+      int ret = epoll_wait(g_state.epfd, events, MAX_STREAMS, -1);
       if (ret < 0)
       {
          if (errno == EINTR)
-            goto poll_retry;
+            continue;
 
          perror("epoll_wait");
          exit(1);
