@@ -17,7 +17,10 @@ long src_callback(void *cb_data, float **data)
    struct stream_info *info = cb_data;
 
    memset(info->src_data_i, 0, info->fragsize);
-   maru_fifo_read(info->fifo, info->src_data_i, info->fragsize);
+
+   ssize_t has_read = maru_fifo_read(info->fifo, info->src_data_i, info->fragsize);
+   if (has_read > 0)
+      info->write_cnt += has_read;
 
    src_short_to_float_array(info->src_data_i, info->src_data_f,
          info->fragsize / sizeof(int16_t));
@@ -82,7 +85,11 @@ static void mix_streams(const struct epoll_event *events, size_t num_events,
          }
          else
          {
-            maru_fifo_read(info->fifo, tmp_mix_buffer_i, fragsize);
+            ssize_t has_read = maru_fifo_read(info->fifo, tmp_mix_buffer_i, fragsize);
+
+            if (has_read > 0)
+               info->write_cnt += has_read;
+
             src_short_to_float_array(tmp_mix_buffer_i, tmp_mix_buffer_f, samples);
          }
 

@@ -158,6 +158,8 @@ static int create_unix_socket(const char *path)
    if (fd < 0)
       return -1;
 
+   unlink(path);
+
    if (bind(fd, (struct sockaddr*)&un, sizeof(un)) < 0)
    {
       close(fd);

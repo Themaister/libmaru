@@ -38,7 +38,9 @@ struct stream_info
    int frags;
 
    bool nonblock;
-   uint64_t write_cnt;
+
+   uint32_t last_write_cnt;
+   uint32_t write_cnt;
 };
 
 static struct stream_info g_stream_info[MAX_STREAMS];
@@ -168,8 +170,8 @@ static void maru_write(fuse_req_t req, const char *data, size_t size, off_t off,
       fuse_reply_err(req, EIO);
    else
    {
-      stream_info->write_cnt += ret;
       fuse_reply_write(req, ret);
+      stream_info->write_cnt += ret;
    }
 }
 
@@ -429,10 +431,25 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_GETOPTR
       case SNDCTL_DSP_GETOPTR:
       {
+         maru_usec lat = maru_stream_current_latency(g_ctx, stream_info->stream);
+         if (lat < 0)
+         {
+            fuse_reply_err(req, EIO);
+            break;
+         }
+
+         size_t driver_write_cnt = stream_info->write_cnt;
+         driver_write_cnt -= (lat * stream_info->sample_rate * stream_info->channels * stream_info->bits / 8) / 1000000;
+
+         if (driver_write_cnt < stream_info->last_write_cnt)
+            driver_write_cnt = stream_info->last_write_cnt;
+
+         stream_info->last_write_cnt = driver_write_cnt;
+
          count_info ci = {
-            .bytes  = stream_info->write_cnt,
-            .blocks = stream_info->write_cnt / stream_info->fragsize,
-            .ptr    = stream_info->write_cnt % (stream_info->fragsize * stream_info->frags),
+            .bytes  = driver_write_cnt,
+            .blocks = driver_write_cnt / stream_info->fragsize,
+            .ptr    = driver_write_cnt % (stream_info->fragsize * stream_info->frags),
          };
 
          PREP_UARG_OUT(&ci);

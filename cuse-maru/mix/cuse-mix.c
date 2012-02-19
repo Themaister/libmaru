@@ -1,6 +1,7 @@
 #include "../../fifo.h"
 #include "cuse-mix.h"
 #include "mixthread.h"
+#include "control.h"
 
 #include <sys/soundcard.h>
 #include <cuse_lowlevel.h>
@@ -211,10 +212,7 @@ static void maru_write(fuse_req_t req, const char *data, size_t size,
    if (ret < 0)
       fuse_reply_err(req, EBUSY);
    else
-   {
       fuse_reply_write(req, ret);
-      stream_info->write_cnt += ret;
-   }
 }
 
 static void maru_update_pollhandle(struct stream_info *info, struct fuse_pollhandle *ph)
@@ -515,11 +513,13 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_GETOPTR
       case SNDCTL_DSP_GETOPTR:
       {
+         global_lock();
          count_info ci = {
             .bytes  = stream_info->write_cnt,
             .blocks = stream_info->write_cnt / stream_info->fragsize,
             .ptr    = stream_info->write_cnt % (stream_info->fragsize * stream_info->frags),
          };
+         global_unlock();
 
          PREP_UARG_OUT(&ci);
          IOCTL_RETURN(&ci);
