@@ -63,7 +63,11 @@ static void request_reply(int fd, const char *str)
 static void request_setplayvol(int fd, int argc, char *argv[])
 {
    if (argc < 2)
+   {
+      fprintf(stderr, "Invalid request!\n");
+      close(fd);
       return;
+   }
 
    errno = 0;
    unsigned stream = strtoul(argv[0], NULL, 0);
@@ -98,7 +102,11 @@ static void request_setplayvol(int fd, int argc, char *argv[])
 static void request_getplayvol(int fd, int argc, char *argv[])
 {
    if (argc < 1)
+   {
+      fprintf(stderr, "Invalid request!\n");
+      close(fd);
       return;
+   }
 
    errno = 0;
    unsigned stream = strtoul(argv[0], NULL, 0);
@@ -122,22 +130,35 @@ static void request_getplayvol(int fd, int argc, char *argv[])
 
 static void parse_request(int fd, int argc, char *argv[])
 {
+#if 0
+   fprintf(stderr, "Parsing request:\n");
+   for (int i = 0; i < argc; i++)
+      fprintf(stderr, "\t[%d] = %s\n", i, argv[i]);
+#endif
+
    if (!argc)
+   {
+      fprintf(stderr, "Invalid request ...\n");
+      close(fd);
       return;
+   }
 
    if (strcmp(argv[0], "SETPLAYVOL") == 0)
       request_setplayvol(fd, argc - 1, argv + 1);
    else if (strcmp(argv[0], "GETPLAYVOL") == 0)
       request_getplayvol(fd, argc - 1, argv + 1);
    else
+   {
       fprintf(stderr, "Invalid request!\n");
+      close(fd);
+   }
 }
 
 static void handle_request(int fd)
 {
    char req_header[8];
    ssize_t ret = read(fd, req_header, sizeof(req_header));
-   if (ret < (ssize_t)req_header)
+   if (ret < (ssize_t)sizeof(req_header))
    {
       close(fd);
       return;
@@ -150,6 +171,7 @@ static void handle_request(int fd)
    if (!substr)
    {
       fprintf(stderr, "Invalid proto header!\n");
+      close(fd);
       return;
    }
    substr += maru_len;
@@ -159,6 +181,7 @@ static void handle_request(int fd)
    if (errno)
    {
       fprintf(stderr, "Invalid length!\n");
+      close(fd);
       return;
    }
 
@@ -166,6 +189,7 @@ static void handle_request(int fd)
    if (request_len > REQUEST_MAX_LEN)
    {
       fprintf(stderr, "Invalid length!\n");
+      close(fd);
       return;
    }
 
@@ -175,6 +199,7 @@ static void handle_request(int fd)
    if (ret < (ssize_t)request_len)
    {
       fprintf(stderr, "Couldn't read complete request.\n");
+      close(fd);
       return;
    }
    request[ret] = '\0';
@@ -187,7 +212,7 @@ static void handle_request(int fd)
    while (argv[argc])
    {
       argc++;
-      argv[argc] = strtok_r(NULL, "\n", &tok);
+      argv[argc] = strtok_r(NULL, " ", &tok);
    }
 
    parse_request(fd, argc, argv);
