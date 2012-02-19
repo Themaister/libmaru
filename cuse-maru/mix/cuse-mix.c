@@ -159,6 +159,9 @@ static bool init_stream(struct stream_info *stream_info)
    if (!fifo)
       return false;
 
+   maru_fifo_set_read_trigger(fifo, stream_info->fragsize);
+   maru_fifo_set_write_trigger(fifo, stream_info->fragsize);
+
    if (stream_info->sample_rate != g_state.format.sample_rate)
    {
       stream_info->src_data_f = malloc(stream_info->fragsize * sizeof(float) / sizeof(int16_t));
