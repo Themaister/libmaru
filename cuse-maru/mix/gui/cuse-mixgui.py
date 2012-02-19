@@ -45,7 +45,7 @@ class Control(Gtk.VBox):
       self.conn = conn
 
       self.scale.connect("value-changed", self.vol_change)
-      GObject.timeout_add_seconds(1, self.update_timer)
+      self.update_timer()
 
    def vol_change(self, widget):
       self.conn.set_volume(self.i, int(self.scale.get_value()))
