@@ -48,20 +48,100 @@ static void accept_connection(void)
    }
 }
 
-#define REQUEST_MAX_LEN 255
+static void request_reply(int fd, const char *str)
+{
+   char msg[256];
+   snprintf(msg, sizeof(msg), "MARU%4zu %s", strlen(str) + 1, str);
+   ssize_t len = strlen(msg);
+   if (write(fd, msg, len) != len)
+   {
+      fprintf(stderr, "Failed to write ...\n");
+      close(fd);
+   }
+}
 
-static void parse_request(int argc, char *argv[])
+static void request_setplayvol(int fd, int argc, char *argv[])
+{
+   if (argc < 2)
+      return;
+
+   errno = 0;
+   unsigned stream = strtoul(argv[0], NULL, 0);
+   int vol = strtol(argv[1], NULL, 0);
+
+   if (errno)
+      return request_reply(fd, "NAK");
+
+   if (stream >= MAX_STREAMS)
+      return request_reply(fd, "NAK");
+
+   if (vol < 0 || vol > 100)
+      return request_reply(fd, "NAK");
+
+   const char *reply;
+   global_lock();
+
+   if (g_state.stream_info[stream].active)
+   {
+      g_state.stream_info[stream].volume = vol;
+      g_state.stream_info[stream].volume_f = vol / 100.0f;
+      reply = "ACK";
+   }
+   else
+      reply = "NOSTREAM";
+
+   global_unlock();
+
+   request_reply(fd, reply);
+}
+
+static void request_getplayvol(int fd, int argc, char *argv[])
+{
+   if (argc < 1)
+      return;
+
+   errno = 0;
+   unsigned stream = strtoul(argv[0], NULL, 0);
+   if (errno)
+      return request_reply(fd, "NAK");
+
+   if (stream >= MAX_STREAMS)
+      return request_reply(fd, "NAK");
+
+   char vol[16] = "NOSTREAM";
+
+   global_lock();
+
+   if (g_state.stream_info[stream].active)
+      snprintf(vol, sizeof(vol), "%d", g_state.stream_info[stream].volume);
+
+   global_unlock();
+
+   request_reply(fd, vol);
+}
+
+static void parse_request(int fd, int argc, char *argv[])
 {
    if (!argc)
       return;
+
+   if (strcmp(argv[0], "SETPLAYVOL") == 0)
+      request_setplayvol(fd, argc - 1, argv + 1);
+   else if (strcmp(argv[0], "GETPLAYVOL") == 0)
+      request_getplayvol(fd, argc - 1, argv + 1);
+   else
+      fprintf(stderr, "Invalid request!\n");
 }
 
 static void handle_request(int fd)
 {
    char req_header[8];
    ssize_t ret = read(fd, req_header, sizeof(req_header));
-   if (ret < (ssize_t)sizeof(req_header))
+   if (ret < (ssize_t)req_header)
+   {
+      close(fd);
       return;
+   }
 
    size_t maru_len = strlen("MARU ");
    char *substr = memmem(req_header, sizeof(req_header),
@@ -82,6 +162,7 @@ static void handle_request(int fd)
       return;
    }
 
+#define REQUEST_MAX_LEN 255
    if (request_len > REQUEST_MAX_LEN)
    {
       fprintf(stderr, "Invalid length!\n");
@@ -109,7 +190,7 @@ static void handle_request(int fd)
       argv[argc] = strtok_r(NULL, "\n", &tok);
    }
 
-   parse_request(argc, argv);
+   parse_request(fd, argc, argv);
 }
 
 static void *thread_entry(void *data)

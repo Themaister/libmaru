@@ -386,7 +386,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
                break;
 
             case 16:
-               i = AFMT_S16_LE;
+               i = AFMT_S16_LE; // Don't support format conversion yet, so take the happy path.
                break;
          }
          IOCTL_RETURN(&i);
@@ -453,8 +453,8 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          int frags = (i >> 16) & 0xffff;
          int fragsize = 1 << (i & 0xffff);
 
-         if (fragsize < 128)
-            fragsize = 128;
+         if (fragsize < g_state.format.fragsize)
+            fragsize = g_state.format.fragsize;
          if (frags < 4)
             frags = 4;
 
