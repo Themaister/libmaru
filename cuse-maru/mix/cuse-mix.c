@@ -38,7 +38,7 @@ void global_unlock(void)
 }
 
 #define HW_FRAGS 4
-#define HW_FRAGSHIFT 12
+#define HW_FRAGSHIFT 11
 
 static bool set_hw_formats(void)
 {
