@@ -602,6 +602,8 @@ static const struct fuse_opt maru_opts[] = {
    MARU_OPT("--name=%s", dev_name),
    FUSE_OPT_KEY("-h", 0),
    FUSE_OPT_KEY("--help", 0),
+   FUSE_OPT_KEY("-D", 1),
+   FUSE_OPT_KEY("--daemon", 1),
    FUSE_OPT_END
 };
 
@@ -611,6 +613,7 @@ static void print_help(void)
    fprintf(stderr, "\t-M major, --maj=major\n");
    fprintf(stderr, "\t-m minor, --min=minor\n");
    fprintf(stderr, "\t-n name, --name=name (default: maru)\n");
+   fprintf(stderr, "\t-D, --daemon, run in background\n");
    fprintf(stderr, "\t\tDevice will be created in /dev/$name.\n");
    fprintf(stderr, "\n");
 }
@@ -623,6 +626,8 @@ static int process_arg(void *data, const char *arg, int key,
       case 0:
          print_help();
          return fuse_opt_add_arg(outargs, "-ho");
+      case 1:
+         return fuse_daemonize(0);
       default:
          return 1;
    }
@@ -649,6 +654,7 @@ int main(int argc, char *argv[])
       fprintf(stderr, "Failed to parse ...\n");
       return 1;
    }
+   fuse_opt_add_arg(&args, "-f");
 
    snprintf(dev_name, sizeof(dev_name), "DEVNAME=%s", param.dev_name ? param.dev_name : "maru");
 
