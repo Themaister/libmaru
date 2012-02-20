@@ -68,7 +68,7 @@ class Control(Gtk.VBox):
          self.process.set_text("")
          self.scale.set_value(0)
 
-      GObject.timeout_add_seconds(1, self.update_timer)
+      GObject.timeout_add(100, self.update_timer)
 
 class Window(Gtk.Window):
    def __init__(self):
