@@ -193,8 +193,6 @@ static bool init_stream(struct stream_info *stream_info)
 
    global_lock();
    stream_info->fifo = fifo;
-   stream_info->volume = 100;
-   stream_info->volume_f = 1.0f;
    global_unlock();
    return true;
 }
@@ -626,7 +624,15 @@ static void maru_release(fuse_req_t req, struct fuse_file_info *info)
    if (stream_info->ph)
       fuse_pollhandle_destroy(stream_info->ph);
 
+   // Keep volume for stream.
+   int vol = stream_info->volume;
+   float vol_f = stream_info->volume_f;
+
    memset(stream_info, 0, sizeof(*stream_info));
+
+   stream_info->volume = vol;
+   stream_info->volume_f = vol_f;
+
    fuse_reply_err(req, 0);
 }
 
@@ -727,6 +733,12 @@ static bool init_cuse_mix(const char *sink_name)
    {
       perror("pthread_mutex_init");
       return false;
+   }
+
+   for (unsigned i = 0; i < MAX_STREAMS; i++)
+   {
+      g_state.stream_info[i].volume = 100;
+      g_state.stream_info[i].volume_f = 1.0f;
    }
 
    if (!start_mix_thread())
