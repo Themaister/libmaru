@@ -1647,6 +1647,9 @@ static maru_error perform_request(maru_context *ctx,
    if (write(ctx->request_fd[1], &req, sizeof(req)) != (ssize_t)sizeof(req))
       return LIBMARU_ERROR_IO;
 
+   if (timeout == 0 && !(request & USB_REQUEST_DIR_MASK))
+      return LIBMARU_SUCCESS;
+
    struct maru_control_request ret_req;
 
    do

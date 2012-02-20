@@ -396,10 +396,15 @@ maru_error maru_stream_get_volume(maru_context *ctx,
  *
  * \param ctx libmaru context
  * \param stream Stream to set volume to.
+ *
  * If stream is set to the pseudo-stream LIBMARU_STREAM_MASTER, volume for mixer output (master) is set.
  * \param volume Volume to set. See \ref maru_volume on how the volume should be encoded.
+ * Volume can also be set to the LIBMARU_VOLUME_MUTE constant to mute the stream.
+ *
  * \param timeout Timeout of request. See maru_stream_get_volume() for more considerations.
- * Volume can also be set to the LIBMARU_VOLUME_MUTE constant to mute.
+ * If timeout is 0, the function will return immediately, so no error checking can be made.
+ * This is useful for GUI were operations like these cannot block for prolonged time.
+ * Note that this differs from maru_stream_get_volume(), where no timeout would make no sense.
  *
  * \returns Error code \ref maru_error.
  */

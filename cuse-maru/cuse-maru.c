@@ -19,6 +19,8 @@
 #define MAX_STREAMS 8
 
 static maru_context *g_ctx;
+static maru_volume g_min_volume;
+static maru_volume g_max_volume;
 
 struct stream_info
 {
@@ -467,13 +469,8 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          PREP_UARG_INOUT(&i, &i);
          int left = i & 0xff;
 
-         maru_volume min, max;
-         if (maru_stream_get_volume(g_ctx, LIBMARU_STREAM_MASTER,
-                  NULL, &min, &max, 50000) != LIBMARU_SUCCESS)
-         {
-            fuse_reply_err(req, EIO);
-            break;
-         }
+         maru_volume min = g_min_volume;
+         maru_volume max = g_max_volume;
 
          maru_volume vol = LIBMARU_VOLUME_MUTE;
          if (i > 0)
@@ -484,7 +481,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          else if (vol > max)
             vol = max;
 
-         if (maru_stream_set_volume(g_ctx, LIBMARU_STREAM_MASTER, vol, 50000) != LIBMARU_SUCCESS)
+         if (maru_stream_set_volume(g_ctx, LIBMARU_STREAM_MASTER, vol, 0) != LIBMARU_SUCCESS)
          {
             fuse_reply_err(req, EIO);
             break;
@@ -502,9 +499,12 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       case SNDCTL_DSP_GETPLAYVOL:
          PREP_UARG_OUT(&i);
 
-         maru_volume cur, min, max;
+         maru_volume cur;
+         maru_volume min = g_min_volume;
+         maru_volume max = g_max_volume;
+
          if (maru_stream_get_volume(g_ctx, LIBMARU_STREAM_MASTER,
-                  &cur, &min, &max, 50000) != LIBMARU_SUCCESS)
+                  &cur, NULL, NULL, 50000) != LIBMARU_SUCCESS)
          {
             fuse_reply_err(req, EIO);
             break;
@@ -685,6 +685,12 @@ int main(int argc, char *argv[])
    if (err != LIBMARU_SUCCESS)
    {
       MARU_LOG_ERROR(err);
+      return 1;
+   }
+
+   if (maru_stream_get_volume(g_ctx, LIBMARU_STREAM_MASTER,
+            NULL, &g_min_volume, &g_max_volume, 50000) != LIBMARU_SUCCESS)
+   {
       return 1;
    }
 

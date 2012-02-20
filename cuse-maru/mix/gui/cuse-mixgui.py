@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 from gi.repository import Gtk, GObject
-import socket, os, sys
+import socket, os, sys, fcntl, array, struct
 
 class Connection:
    def __init__(self, sock):
@@ -36,16 +36,59 @@ class Connection:
 
       return self.get_reply().decode().split(" ")[-1]
 
+class MasterControl(Gtk.HBox):
+   def __init__(self, path):
+      Gtk.HBox.__init__(self)
+      self.pack_start(Gtk.Label("Master"), False, True, 30)
+
+      self.scale = Gtk.HScale()
+      self.scale.set_range(0, 100)
+      self.scale.set_value(0)
+      self.scale.set_size_request(200, -1)
+      self.scale.set_sensitive(False)
+      self.scale.connect("value-changed", self.vol_change)
+
+      self.setplayvol = 0xc0045018 # IOCTL stuff
+      self.getplayvol = 0x80045018 # IOCTL stuff
+
+      self.fd = open(path, 'wb')
+
+      self.pack_start(self.scale, True, True, 20)
+
+      self.update_timer()
+
+   def set_volume(self, vol):
+      buf = array.array('i', [vol])
+      fcntl.ioctl(self.fd.fileno(), self.setplayvol, buf)
+
+   def get_volume(self):
+      buf = array.array('i', [0])
+      fcntl.ioctl(self.fd.fileno(), self.getplayvol, buf, 1)
+      return struct.unpack('i', buf)[0] & 0xff
+
+   def vol_change(self, widget):
+      self.set_volume(int(self.scale.get_value()))
+
+   def update_timer(self):
+      try:
+         self.scale.set_value(self.get_volume())
+         self.scale.set_sensitive(True)
+      except:
+         self.scale.set_sensitive(False)
+         self.scale.set_value(0)
+
+      GObject.timeout_add_seconds(5, self.update_timer)
+
 class Control(Gtk.VBox):
    def __init__(self, conn, i):
-      Gtk.Box.__init__(self)
-      self.pack_start(Gtk.Label("Stream #{}".format(i)), False, True, 10)
+      Gtk.VBox.__init__(self)
       self.scale = Gtk.VScale()
       self.process = Gtk.Label()
       self.pack_start(self.process, False, True, 10)
       self.scale.set_range(0, 100)
       self.scale.set_value(0)
       self.scale.set_size_request(-1, 300)
+      self.set_size_request(40, -1)
       self.scale.set_property("inverted", True)
       self.scale.set_sensitive(False)
       self.pack_start(self.scale, True, True, 10)
@@ -76,10 +119,16 @@ class Window(Gtk.Window):
       self.conn = Connection("/tmp/marumix")
       self.set_border_width(5)
 
+      vbox = Gtk.VBox()
+
+      vbox.pack_start(MasterControl("/dev/maru"), False, True, 10)
+
       box = Gtk.HBox()
       for i in range(8):
          box.pack_start(Control(self.conn, i), True, True, 10)
-      self.add(box)
+
+      vbox.pack_start(box, True, True, 0)
+      self.add(vbox)
 
 if __name__ == '__main__':
    win = Window()
