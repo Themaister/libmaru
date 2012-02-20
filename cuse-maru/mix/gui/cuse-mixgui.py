@@ -45,6 +45,7 @@ class MasterControl(Gtk.HBox):
       self.scale.set_range(0, 100)
       self.scale.set_value(0)
       self.scale.set_size_request(200, -1)
+      self.scale.set_round_digits(0)
       self.scale.set_sensitive(False)
       self.scale.connect("value-changed", self.vol_change)
 
@@ -88,8 +89,9 @@ class Control(Gtk.VBox):
       self.scale.set_range(0, 100)
       self.scale.set_value(0)
       self.scale.set_size_request(-1, 300)
+      self.scale.set_round_digits(0)
       self.set_size_request(40, -1)
-      self.scale.set_property("inverted", True)
+      self.scale.set_inverted(True)
       self.scale.set_sensitive(False)
       self.pack_start(self.scale, True, True, 10)
       self.i = i
@@ -124,7 +126,7 @@ class Window(Gtk.Window):
       vbox.pack_start(MasterControl("/dev/maru"), False, True, 10)
 
       box = Gtk.HBox()
-      for i in range(8):
+      for i in range(4):
          box.pack_start(Control(self.conn, i), True, True, 10)
 
       vbox.pack_start(box, True, True, 0)
