@@ -90,7 +90,7 @@ class Control(Gtk.VBox):
       self.scale.set_value(0)
       self.scale.set_size_request(-1, 300)
       self.scale.set_round_digits(0)
-      self.set_size_request(40, -1)
+      self.set_size_request(25, -1)
       self.scale.set_inverted(True)
       self.scale.set_sensitive(False)
       self.pack_start(self.scale, True, True, 10)
@@ -123,11 +123,18 @@ class Window(Gtk.Window):
 
       vbox = Gtk.VBox()
 
-      vbox.pack_start(MasterControl("/dev/maru"), False, True, 10)
+      vbox.pack_start(MasterControl("/dev/maru"), False, True, 3)
+      vbox.pack_start(Gtk.HSeparator(), False, True, 3)
 
       box = Gtk.HBox()
-      for i in range(4):
-         box.pack_start(Control(self.conn, i), True, True, 10)
+
+      box.pack_start(Control(self.conn, 0), True, True, 3)
+      box.pack_start(Gtk.VSeparator(), False, True, 3)
+      box.pack_start(Control(self.conn, 1), True, True, 3)
+      box.pack_start(Gtk.VSeparator(), False, True, 3)
+      box.pack_start(Control(self.conn, 2), True, True, 3)
+      box.pack_start(Gtk.VSeparator(), False, True, 3)
+      box.pack_start(Control(self.conn, 3), True, True, 3)
 
       vbox.pack_start(box, True, True, 0)
       self.add(vbox)
