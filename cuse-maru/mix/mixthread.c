@@ -18,17 +18,17 @@ long src_callback(void *cb_data, float **data)
 {
    struct stream_info *info = cb_data;
 
-   memset(info->src_data_i, 0, info->fragsize);
+   memset(info->src_data_i, 0, g_state.format.fragsize);
 
-   ssize_t has_read = maru_fifo_read(info->fifo, info->src_data_i, info->fragsize);
+   ssize_t has_read = maru_fifo_read(info->fifo, info->src_data_i, g_state.format.fragsize);
    if (has_read > 0)
       info->write_cnt += has_read;
 
    src_short_to_float_array(info->src_data_i, info->src_data_f,
-         info->fragsize / sizeof(int16_t));
+         g_state.format.fragsize / sizeof(int16_t));
 
    *data = info->src_data_f;
-   return info->fragsize / (info->channels * info->bits / 8);
+   return g_state.format.fragsize / (info->channels * info->bits / 8);
 }
 
 static bool write_all(int fd, const void *data_, size_t size)

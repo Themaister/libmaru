@@ -159,13 +159,12 @@ static bool init_stream(struct stream_info *stream_info)
    if (!fifo)
       return false;
 
-   maru_fifo_set_read_trigger(fifo, stream_info->fragsize);
-   maru_fifo_set_write_trigger(fifo, stream_info->fragsize);
+   maru_fifo_set_read_trigger(fifo, g_state.format.fragsize);
 
    if (stream_info->sample_rate != g_state.format.sample_rate)
    {
-      stream_info->src_data_f = malloc(stream_info->fragsize * sizeof(float) / sizeof(int16_t));
-      stream_info->src_data_i = malloc(stream_info->fragsize);
+      stream_info->src_data_f = malloc(g_state.format.fragsize * sizeof(float) / sizeof(int16_t));
+      stream_info->src_data_i = malloc(g_state.format.fragsize);
       assert(stream_info->src_data_f);
       assert(stream_info->src_data_i);
 
@@ -204,11 +203,14 @@ static void reset_stream(struct stream_info *stream_info)
       return;
 
    epoll_ctl(g_state.epfd, EPOLL_CTL_DEL, maru_fifo_read_notify_fd(fifo), NULL);
-   eventfd_write(g_state.ping_fd, 1);
 
    global_lock();
    stream_info->fifo = NULL;
    global_unlock();
+
+   maru_fifo_free(fifo);
+
+   eventfd_write(g_state.ping_fd, 1);
 
    if (stream_info->src)
    {
@@ -220,8 +222,6 @@ static void reset_stream(struct stream_info *stream_info)
       stream_info->src_data_f = NULL;
       stream_info->src_data_i = NULL;
    }
-
-   maru_fifo_free(fifo);
 }
 
 static void maru_write(fuse_req_t req, const char *data, size_t size,
@@ -264,7 +264,7 @@ static void maru_poll(fuse_req_t req, struct fuse_file_info *info,
    maru_update_pollhandle(stream_info, ph);
    global_unlock();
 
-   if (!stream_info->fifo || maru_fifo_write_avail(stream_info->fifo) >= stream_info->fragsize)
+   if (!stream_info->fifo || maru_fifo_write_avail(stream_info->fifo))
       fuse_reply_poll(req, POLLOUT);
    else
       fuse_reply_poll(req, 0);
@@ -486,9 +486,16 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          int fragsize = 1 << (i & 0xffff);
 
          if (fragsize < g_state.format.fragsize)
+         {
+            fprintf(stderr, "*** Fragsize set is too low: %d bytes!\n", fragsize);
             fragsize = g_state.format.fragsize;
-         if (frags < 4)
-            frags = 4;
+         }
+
+         if (frags < 2)
+         {
+            fprintf(stderr, "*** Number of fragments is too low: %d frags!\n", frags);
+            frags = 2;
+         }
 
          stream_info->fragsize = fragsize;
          stream_info->frags    = frags;
@@ -523,6 +530,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_SYNC
       case SNDCTL_DSP_SYNC:
       {
+         fprintf(stderr, "SYNC\n");
          if (ioctl(g_state.dev, SNDCTL_DSP_GETODELAY, &i) < 0)
          {
             fuse_reply_err(req, EINVAL);
@@ -538,6 +546,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          usleep(usec);
 
          IOCTL_RETURN_NULL();
+         fprintf(stderr, "SYNC END\n");
          break;
       }
 #endif
