@@ -387,8 +387,8 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          int frags = (i >> 16) & 0xffff;
          int fragsize = 1 << (i & 0xffff);
 
-         if (fragsize < 128)
-            fragsize = 128;
+         if (fragsize < 256)
+            fragsize = 256;
          if (frags < 4)
             frags = 4;
 
