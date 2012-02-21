@@ -57,8 +57,13 @@ struct maru_stream_internal
    struct transfer_list trans;
    unsigned trans_count;
 
-   bool valid_last_latency;
-   struct timespec last_latency_update;
+   struct
+   {
+      bool started;
+      maru_usec start_time;
+      maru_usec offset;
+      uint64_t write_cnt;
+   } timer;
 };
 
 struct maru_context
@@ -527,7 +532,7 @@ static bool append_transfer(struct transfer_list *list, struct maru_transfer *tr
    return true;
 }
 
-#define LIBMARU_MAX_ENQUEUE_COUNT 8
+#define LIBMARU_MAX_ENQUEUE_COUNT 64
 #define LIBMARU_MAX_ENQUEUE_TRANSFERS 2
 
 static struct maru_transfer *create_transfer(struct transfer_list *list, size_t required_buffer)
@@ -551,30 +556,6 @@ error:
    return NULL;
 }
 
-static void update_last_latency(struct maru_stream_internal *stream)
-{
-   stream->valid_last_latency =
-      clock_gettime(CLOCK_MONOTONIC, &stream->last_latency_update) == 0;
-}
-
-static maru_usec latency_offset(struct maru_stream_internal *stream)
-{
-   if (!stream->valid_last_latency)
-   {
-      fprintf(stderr, "Non-valid last latency :(\n");
-      return 0;
-   }
-
-   struct timespec tv;
-   if (clock_gettime(CLOCK_MONOTONIC, &tv) < 0)
-      return 0;
-
-   int64_t diff_usec = (int64_t)(stream->last_latency_update.tv_nsec - tv.tv_nsec) / 1000;
-   diff_usec += ((int64_t)stream->last_latency_update.tv_sec - (int64_t)tv.tv_sec) * 1000000;
-
-   return diff_usec;
-}
-
 static void transfer_stream_cb(struct libusb_transfer *trans)
 {
    struct maru_transfer *transfer = trans->user_data;
@@ -590,7 +571,6 @@ static void transfer_stream_cb(struct libusb_transfer *trans)
             POLLIN);
    }
 
-   update_last_latency(transfer->stream);
    if (transfer->stream->fifo)
       maru_fifo_read_unlock(transfer->stream->fifo, &transfer->region);
 
@@ -703,8 +683,6 @@ static bool enqueue_transfer(maru_context *ctx, struct maru_stream_internal *str
    transfer->active = true;
 
    fill_transfer(ctx, transfer, region, packet_len, packets);
-
-   update_last_latency(stream);
 
    if (libusb_submit_transfer(transfer->trans) < 0)
    {
@@ -1059,7 +1037,7 @@ static bool init_stream_nolock(maru_context *ctx,
       return false;
 
    size_t buffer_size = desc->buffer_size;
-   if (buffer_size == 0)
+   if (!buffer_size)
       buffer_size = 1024 * 32;
 
    // Set fragment size.
@@ -1071,8 +1049,6 @@ static bool init_stream_nolock(maru_context *ctx,
    if (!str->fifo)
       return false;
 
-   buffer_size = maru_fifo_write_avail(str->fifo);
-
    size_t read_trigger = frag_size;
 
    if (maru_fifo_set_read_trigger(str->fifo,
@@ -1083,6 +1059,7 @@ static bool init_stream_nolock(maru_context *ctx,
       return false;
    }
 
+#if 0
    if (maru_fifo_set_write_trigger(str->fifo,
             frag_size) < 0)
    {
@@ -1090,6 +1067,7 @@ static bool init_stream_nolock(maru_context *ctx,
       str->fifo = NULL;
       return false;
    }
+#endif
 
    poll_list_add(ctx->epfd,
          maru_fifo_read_notify_fd(str->fifo), POLLIN);
@@ -1105,7 +1083,7 @@ static bool init_stream_nolock(maru_context *ctx,
    str->transfer_speed = str->transfer_speed_fraction;
    str->trans_count = 0;
 
-   str->valid_last_latency = false;
+   str->timer.started = false;
 
    return true;
 }
@@ -1581,20 +1559,46 @@ end:
    return ret;
 }
 
+static maru_usec current_time(void)
+{
+   struct timespec tv;
+   clock_gettime(CLOCK_MONOTONIC_RAW, &tv);
+
+   maru_usec time = tv.tv_sec * INT64_C(1000000);
+   time += tv.tv_nsec / 1000;
+   return time;
+}
+
+static void init_timer(struct maru_stream_internal *str)
+{
+   str->timer.started = true;
+
+   str->timer.start_time = current_time();
+   str->timer.write_cnt = 0;
+   str->timer.offset = 0;
+}
+
 size_t maru_stream_write(maru_context *ctx, maru_stream stream,
       const void *data, size_t size)
 {
    if (stream >= ctx->num_streams)
       return 0;
 
-   maru_fifo *fifo = ctx->streams[stream].fifo;
+   struct maru_stream_internal *str = &ctx->streams[stream];
+
+   maru_fifo *fifo = str->fifo;
    if (!fifo)
    {
       fprintf(stderr, "Stream has no fifo!\n");
       return 0;
    }
 
-   return maru_fifo_blocking_write(fifo, data, size);
+   if (!str->timer.started)
+      init_timer(str);
+
+   size_t ret = maru_fifo_blocking_write(fifo, data, size);
+   str->timer.write_cnt += ret;
+   return ret;
 }
 
 int maru_stream_notification_fd(maru_context *ctx,
@@ -1771,19 +1775,52 @@ maru_error maru_stream_set_volume(maru_context *ctx,
    return perform_volume_request(ctx, &volume, USB_REQUEST_UAC_SET_CUR, timeout);
 }
 
+// Estimate current audio latency using high-precision timers.
+// This value must be gradually corrected against a low-resolution, but
+// "correct" timer value to combat clock skew.
+static maru_usec timed_latency(struct maru_stream_internal *stream)
+{
+   maru_usec since_start = current_time() - stream->timer.start_time;
+   maru_usec buffered_time = (stream->timer.write_cnt * 1000000) / stream->bps;
+
+   return buffered_time - since_start + stream->timer.offset;
+}
+
 maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream)
 {
    if (stream >= ctx->num_streams)
       return LIBMARU_ERROR_INVALID;
 
-   if (!ctx->streams[stream].fifo)
+   struct maru_stream_internal *str = &ctx->streams[stream];
+
+   if (!str->fifo)
       return LIBMARU_ERROR_INVALID;
 
-   maru_usec ret = (maru_fifo_buffered_size(ctx->streams[stream].fifo) * INT64_C(1000000)) / ctx->streams[stream].bps;
-   ctx_lock(ctx);
-   ret += latency_offset(&ctx->streams[stream]);
-   ctx_unlock(ctx);
-   return ret;
+   if (!str->timer.started)
+      return 0;
+
+   // Buffer latency is the maximum possible latency.
+   maru_usec buffer_latency = (maru_fifo_buffered_size(str->fifo) * INT64_C(1000000)) / str->bps;
+
+   // Timed latency. May or may not be correct.
+   maru_usec timer_latency = timed_latency(str);
+
+   // Timer is completely off, just reset it.
+   if (timer_latency < 0 ||
+         buffer_latency > timer_latency + 100000 ||
+         buffer_latency < timer_latency - 100000)
+   {
+      init_timer(str);
+      return buffer_latency;
+   }
+
+   // Adjust slowly over time.
+   if (timer_latency > buffer_latency)
+      str->timer.offset -= 100;
+   else if (buffer_latency > timer_latency + 10000)
+      str->timer.offset += 100;
+
+   return timer_latency;
 }
 
 const char *maru_error_string(maru_error error)

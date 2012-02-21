@@ -41,7 +41,6 @@ struct stream_info
 
    bool nonblock;
 
-   uint32_t last_write_cnt;
    uint32_t write_cnt;
 };
 
@@ -350,7 +349,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_GETOSPACE
       case SNDCTL_DSP_GETOSPACE:
       {
-         size_t write_avail = stream_info->fragsize * stream_info->frags;
+         size_t write_avail = stream_info->fragsize * stream_info->frags - 1;
          if (stream_info->stream != LIBMARU_STREAM_MASTER)
             write_avail = maru_stream_write_avail(g_ctx, stream_info->stream);
 
@@ -433,20 +432,9 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_GETOPTR
       case SNDCTL_DSP_GETOPTR:
       {
-         maru_usec lat = maru_stream_current_latency(g_ctx, stream_info->stream);
-         if (lat < 0)
-         {
-            fuse_reply_err(req, EIO);
-            break;
-         }
-
          size_t driver_write_cnt = stream_info->write_cnt;
-         driver_write_cnt -= (lat * stream_info->sample_rate * stream_info->channels * stream_info->bits / 8) / 1000000;
-
-         if (driver_write_cnt < stream_info->last_write_cnt)
-            driver_write_cnt = stream_info->last_write_cnt;
-
-         stream_info->last_write_cnt = driver_write_cnt;
+         driver_write_cnt -= stream_info->fragsize * stream_info->frags - 1;
+         driver_write_cnt += maru_stream_write_avail(g_ctx, stream_info->stream);
 
          count_info ci = {
             .bytes  = driver_write_cnt,
