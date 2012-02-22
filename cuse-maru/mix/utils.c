@@ -23,6 +23,12 @@ void audio_convert_float_to_s16_C(int16_t *out,
    }
 }
 
+void audio_mix_volume_C(float *out, const float *in, float vol, size_t samples)
+{
+   for (size_t i = 0; i < samples; i++)
+      out[i] += in[i] * vol;
+}
+
 #if __SSE2__
 void audio_convert_s16_to_float_SSE2(float *out,
       const int16_t *in, size_t samples)
@@ -67,6 +73,35 @@ void audio_convert_float_to_s16_SSE2(int16_t *out,
 
    audio_convert_float_to_s16_C(out, in, samples - i);
 }
+
+void audio_mix_volume_SSE2(float *out, const float *in, float vol, size_t samples)
+{
+   __m128 volume = _mm_set1_ps(vol);
+
+   size_t i;
+   for (i = 0; i + 16 <= samples; i += 16, out += 16, in += 16)
+   {
+      __m128 input[4] = {
+         _mm_load_ps(out +  0),
+         _mm_load_ps(out +  4),
+         _mm_load_ps(out +  8),
+         _mm_load_ps(out + 12),
+      };
+
+      __m128 additive[4] = {
+         _mm_mul_ps(volume, _mm_load_ps(in +  0)),
+         _mm_mul_ps(volume, _mm_load_ps(in +  4)),
+         _mm_mul_ps(volume, _mm_load_ps(in +  8)),
+         _mm_mul_ps(volume, _mm_load_ps(in + 12)),
+      };
+
+      for (unsigned i = 0; i < 4; i++)
+         _mm_store_ps(out + 4 * i, _mm_add_ps(input[i], additive[i]));
+   }
+
+   audio_mix_volume_C(out + i, in + i, vol, samples - i);
+}
+
 #elif __ALTIVEC__
 void audio_convert_s16_to_float_altivec(float *out,
       const int16_t *in, size_t samples)

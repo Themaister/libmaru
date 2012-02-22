@@ -38,10 +38,9 @@ static void mix_streams(const struct epoll_event *events, size_t num_events,
 {
    size_t samples = fragsize / (g_state.format.bits / 8);
 
-   float tmp_mix_buffer_f[samples];
-   int16_t tmp_mix_buffer_i[samples];
-
-   float mix_buffer_f[samples];
+   float tmp_mix_buffer_f[samples] AUDIO_ALIGNED;
+   int16_t tmp_mix_buffer_i[samples] AUDIO_ALIGNED;
+   float mix_buffer_f[samples] AUDIO_ALIGNED;
 
    memset(mix_buffer_f, 0, sizeof(mix_buffer_f));
 
@@ -83,8 +82,7 @@ static void mix_streams(const struct epoll_event *events, size_t num_events,
          maru_fifo_read_notify_ack(info->fifo);
       }
 
-      for (size_t i = 0; i < samples; i++)
-         mix_buffer_f[i] += tmp_mix_buffer_f[i] * info->volume_f;
+      audio_mix_volume(mix_buffer_f, tmp_mix_buffer_f, info->volume_f, samples);
    }
    global_unlock();
 
