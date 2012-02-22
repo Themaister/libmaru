@@ -22,7 +22,6 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
-#include <samplerate.h>
 #include <limits.h>
 
 struct global g_state;
@@ -163,21 +162,13 @@ static bool init_stream(struct stream_info *stream_info)
 
    if (stream_info->sample_rate != g_state.format.sample_rate)
    {
-      stream_info->src_data_f = malloc(g_state.format.fragsize * sizeof(float) / sizeof(int16_t));
-      stream_info->src_data_i = malloc(g_state.format.fragsize);
-      assert(stream_info->src_data_f);
-      assert(stream_info->src_data_i);
+      resampler_init(&stream_info->src, fifo,
+            stream_info->sample_rate, g_state.format.sample_rate);
 
-      stream_info->src = src_callback_new(src_callback,
-            SRC_SINC_FASTEST, stream_info->channels, NULL, stream_info);
-
-      if (!stream_info->src)
-      {
-         fprintf(stderr, "Failed to init samplerate ...\n");
-         maru_fifo_free(fifo);
-         return false;
-      }
+      stream_info->src_active = true;
    }
+   else
+      stream_info->src_active = false;
 
    int ret = epoll_ctl(g_state.epfd, EPOLL_CTL_ADD, maru_fifo_read_notify_fd(fifo),
          &(struct epoll_event) {
@@ -211,17 +202,6 @@ static void reset_stream(struct stream_info *stream_info)
    maru_fifo_free(fifo);
 
    eventfd_write(g_state.ping_fd, 1);
-
-   if (stream_info->src)
-   {
-      src_delete(stream_info->src);
-      stream_info->src = NULL;
-
-      free(stream_info->src_data_f);
-      free(stream_info->src_data_i);
-      stream_info->src_data_f = NULL;
-      stream_info->src_data_i = NULL;
-   }
 }
 
 static void maru_write(fuse_req_t req, const char *data, size_t size,
@@ -399,6 +379,10 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
             fuse_reply_err(req, EINVAL);
             break;
          }
+
+         // Don't really support downsampling, so cap the sample rate.
+         if (i > g_state.format.sample_rate)
+            i = g_state.format.sample_rate;
 
          stream_info->sample_rate = i;
          IOCTL_RETURN(&i);

@@ -3,7 +3,7 @@ TARGET := cuse-mix
 PREFIX = /usr/local
 
 CFLAGS += -O3 -g -pthread -std=gnu99 -Wall $(shell pkg-config fuse --cflags)
-LDFLAGS += -pthread $(shell pkg-config fuse --libs) -lsamplerate
+LDFLAGS += -pthread $(shell pkg-config fuse --libs) -lm
 
 SOURCES := $(wildcard *.c) ../../fifo.c
 OBJECTS := $(SOURCES:.c=.o)

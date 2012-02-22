@@ -2,6 +2,7 @@
 #define CUSE_MIX_H__
 
 #include "../../fifo.h"
+#include "resampler.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <samplerate.h>
@@ -27,9 +28,8 @@ struct stream_info
 
    bool nonblock;
 
-   SRC_STATE *src;
-   float *src_data_f;
-   int16_t *src_data_i;
+   bool src_active;
+   struct maru_resampler src;
 };
 
 struct global

@@ -1,5 +1,6 @@
 #include "cuse-mix.h"
 #include "mixthread.h"
+#include "utils.h"
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -13,23 +14,6 @@
 #include <sys/ioctl.h>
 
 static pthread_t g_thread;
-
-long src_callback(void *cb_data, float **data)
-{
-   struct stream_info *info = cb_data;
-
-   memset(info->src_data_i, 0, g_state.format.fragsize);
-
-   ssize_t has_read = maru_fifo_read(info->fifo, info->src_data_i, g_state.format.fragsize);
-   if (has_read > 0)
-      info->write_cnt += has_read;
-
-   src_short_to_float_array(info->src_data_i, info->src_data_f,
-         g_state.format.fragsize / sizeof(int16_t));
-
-   *data = info->src_data_f;
-   return g_state.format.fragsize / (info->channels * info->bits / 8);
-}
 
 static bool write_all(int fd, const void *data_, size_t size)
 {
@@ -78,12 +62,13 @@ static void mix_streams(const struct epoll_event *events, size_t num_events,
 
       if (info->fifo)
       {
-         if (info->src)
+         if (info->src_active)
          {
-            src_callback_read(info->src,
-                  (double)g_state.format.sample_rate / info->sample_rate,
-                  samples / info->channels,
-                  tmp_mix_buffer_f);
+            size_t has_read = resampler_process(&info->src,
+                  tmp_mix_buffer_f,
+                  samples / info->channels);
+
+            info->write_cnt += has_read;
          }
          else
          {
@@ -92,7 +77,7 @@ static void mix_streams(const struct epoll_event *events, size_t num_events,
             if (has_read > 0)
                info->write_cnt += has_read;
 
-            src_short_to_float_array(tmp_mix_buffer_i, tmp_mix_buffer_f, samples);
+            audio_convert_s16_to_float(tmp_mix_buffer_f, tmp_mix_buffer_i, samples);
          }
 
          maru_fifo_read_notify_ack(info->fifo);
@@ -103,7 +88,7 @@ static void mix_streams(const struct epoll_event *events, size_t num_events,
    }
    global_unlock();
 
-   src_float_to_short_array(mix_buffer_f, mix_buffer, samples);
+   audio_convert_float_to_s16(mix_buffer, mix_buffer_f, samples);
 }
 
 static void *thread_entry(void *data)
