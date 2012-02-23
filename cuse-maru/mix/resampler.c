@@ -21,6 +21,19 @@ static inline double sinc(double val)
       return sin(val) / val;
 }
 
+static inline double blackman(double index)
+{
+   index *= 0.5;
+   index += 0.5;
+
+   double alpha = 0.16;
+   double a0 = (1.0 - alpha) / 2.0;
+   double a1 = 0.5;
+   double a2 = alpha / 2.0;
+
+   return a0 - a1 * cos(2.0 * M_PI * index) + a2 * cos(4.0 * M_PI * index);
+}
+
 static void init_sinc_table(struct maru_resampler *resamp)
 {
    for (unsigned i = 0; i <= PHASES; i++)
@@ -28,7 +41,7 @@ static void init_sinc_table(struct maru_resampler *resamp)
       for (unsigned j = 0; j < SIDELOBES; j++)
       {
          double sinc_phase = M_PI * ((double)i / PHASES + (double)j);
-         resamp->phase_table[i][j] = sinc(sinc_phase) * sinc(sinc_phase / SIDELOBES); // Lanczos window.
+         resamp->phase_table[i][j] = sinc(sinc_phase) * blackman(sinc_phase / SIDELOBES);
       }
    }
 

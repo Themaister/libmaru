@@ -457,7 +457,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_GETOSPACE
       case SNDCTL_DSP_GETOSPACE:
       {
-         size_t write_avail = stream_info->fragsize * stream_info->frags;
+         size_t write_avail = stream_info->fragsize * stream_info->frags - 1;
          if (stream_info->fifo)
             write_avail = maru_fifo_write_avail(stream_info->fifo);
 
