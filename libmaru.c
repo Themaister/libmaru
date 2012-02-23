@@ -1811,22 +1811,23 @@ maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream)
    // Buffer latency is the maximum possible latency (ignoring USB HW latencies which are unknown).
    maru_usec buffer_latency = (maru_fifo_buffered_size(str->fifo) * INT64_C(1000000)) / str->bps;
 
+   // Chunk latency. buffer_latency - chunk_latency represents the lower bound of latency.
+   maru_usec chunk_latency = str->enqueue_count * 1000;
+
    // Timed latency. May or may not be correct.
    maru_usec timer_latency = timed_latency(str);
 
    if (timer_latency < 0)
       timer_latency = 0;
 
-#define MAX_USEC_DEVIATION 50000
    // Timer is completely off, just reset it.
-   if (timer_latency < 0 ||
-         buffer_latency > timer_latency + MAX_USEC_DEVIATION ||
-         buffer_latency < timer_latency - MAX_USEC_DEVIATION)
+   if (buffer_latency > timer_latency + 2 * chunk_latency ||
+         buffer_latency < timer_latency - 2 * chunk_latency)
    {
       init_timer(str);
       str->timer.offset = buffer_latency;
-      fprintf(stderr, "Resetting latency ...\n");
-      fprintf(stderr, "Timer latency = %lld, Buffer latency = %lld\n", (long long)timer_latency, (long long)buffer_latency);
+      //fprintf(stderr, "Resetting latency ...\n");
+      //fprintf(stderr, "Timer latency = %lld, Buffer latency = %lld\n", (long long)timer_latency, (long long)buffer_latency);
       return buffer_latency;
    }
 
@@ -1837,7 +1838,7 @@ maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream)
    if (timer_latency > buffer_latency)
       str->timer.offset -= JITTER_USEC_ADJUSTMENT;
    // Estimated latency is likely (we can't know for sure) too low, adjust it upwards.
-   else if (buffer_latency > timer_latency + str->enqueue_count * 1000)
+   else if (buffer_latency > timer_latency + chunk_latency)
       str->timer.offset += JITTER_USEC_ADJUSTMENT;
 
    return timer_latency;
