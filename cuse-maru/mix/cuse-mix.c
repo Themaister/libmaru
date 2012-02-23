@@ -36,9 +36,6 @@ void global_unlock(void)
    pthread_mutex_unlock(&g_state.lock);
 }
 
-#define HW_FRAGS 8
-#define HW_FRAGSHIFT 11
-
 static bool set_hw_formats(void)
 {
    int fragshift = 0;
@@ -66,8 +63,13 @@ static bool set_hw_formats(void)
       return false;
    }
 
+   if (g_state.format.sw_fragsize < g_state.format.fragsize)
+      g_state.format.sw_fragsize = g_state.format.fragsize;
+
    fprintf(stderr, "HW frags:    %u\n", g_state.format.hw_frags);
-   fprintf(stderr, "HW fragsize: %d\n", 1 << fragshift);
+   fprintf(stderr, "HW fragsize: %d\n", g_state.format.fragsize);
+   fprintf(stderr, "SW frags:    %u\n", g_state.format.sw_frags);
+   fprintf(stderr, "SW fragsize: %u\n", g_state.format.sw_fragsize);
    fprintf(stderr, "HW rate:     %d\n", g_state.format.sample_rate);
 
    g_state.format.channels = 2;
@@ -145,8 +147,8 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
    stream_info->channels = g_state.format.channels;
    stream_info->bits = g_state.format.bits;
 
-   stream_info->fragsize = g_state.format.fragsize;
-   stream_info->frags = g_state.format.hw_frags;
+   stream_info->fragsize = g_state.format.sw_fragsize;
+   stream_info->frags = g_state.format.sw_frags;
 
    info->nonseekable = 1;
    info->direct_io = 1;
@@ -481,13 +483,15 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          if (fragsize < g_state.format.fragsize)
          {
             fprintf(stderr, "*** Fragsize set is too low: %d bytes!\n", fragsize);
-            fragsize = g_state.format.fragsize;
+            fuse_reply_err(req, EINVAL);
+            break;
          }
 
          if (frags < 2)
          {
             fprintf(stderr, "*** Number of fragments is too low: %d frags!\n", frags);
-            frags = 2;
+            fuse_reply_err(req, EINVAL);
+            break;
          }
 
          stream_info->fragsize = fragsize;
@@ -649,6 +653,9 @@ struct maru_param
    unsigned hw_fragsize;
    unsigned hw_frags;
    unsigned hw_rate;
+
+   unsigned sw_frags;
+   unsigned sw_fragsize;
 };
 
 static const struct fuse_opt maru_opts[] = {
@@ -661,6 +668,8 @@ static const struct fuse_opt maru_opts[] = {
    MARU_OPT("--sink=%s", sink_name),
    MARU_OPT("--hw-frags=%u", hw_frags),
    MARU_OPT("--hw-fragsize=%u", hw_fragsize),
+   MARU_OPT("--sw-frags=%u", sw_frags),
+   MARU_OPT("--sw-fragsize=%u", sw_fragsize),
    MARU_OPT("--hw-rate=%u", hw_rate),
    FUSE_OPT_KEY("-h", 0),
    FUSE_OPT_KEY("--help", 0),
@@ -678,6 +687,8 @@ static void print_help(void)
    fprintf(stderr, "\t--sink=device (default: /dev/maru)\n");
    fprintf(stderr, "\t--hw-frags=frags (default: 4)\n");
    fprintf(stderr, "\t--hw-fragsize=fragsize (default: 4096)\n");
+   fprintf(stderr, "\t--sw-frags=frags (default: 4)\n");
+   fprintf(stderr, "\t--sw-fragsize=fragsize (default: 4096)\n");
    fprintf(stderr, "\t--hw-rate=rate (default: 48000)\n");
    fprintf(stderr, "\t-D, --daemon, run in background\n");
    fprintf(stderr, "\t\tDevice will be created in /dev/$name.\n");
@@ -768,6 +779,8 @@ int main(int argc, char *argv[])
    struct maru_param param = {
       .hw_frags = 4,
       .hw_fragsize = 4096,
+      .sw_frags = 4,
+      .sw_fragsize = 4096,
       .hw_rate = 48000,
    }; 
 
@@ -781,8 +794,10 @@ int main(int argc, char *argv[])
    }
    fuse_opt_add_arg(&args, "-f");
 
-   g_state.format.hw_frags = param.hw_frags;
+   g_state.format.hw_frags    = param.hw_frags;
    g_state.format.hw_fragsize = param.hw_fragsize;
+   g_state.format.sw_frags    = param.sw_frags;
+   g_state.format.sw_fragsize = param.sw_fragsize;
    g_state.format.sample_rate = param.hw_rate;
 
    snprintf(dev_name, sizeof(dev_name), "DEVNAME=%s",

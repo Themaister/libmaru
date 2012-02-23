@@ -49,6 +49,8 @@ struct global
 
       unsigned hw_frags;
       unsigned hw_fragsize;
+      unsigned sw_frags;
+      unsigned sw_fragsize;
    } format;
 
 #define MAX_STREAMS 16

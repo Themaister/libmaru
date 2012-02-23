@@ -54,8 +54,11 @@ struct maru_stream_internal
    maru_notification_cb error_cb;
    void *error_userdata;
 
+   int sync_fd;
+
    struct transfer_list trans;
    unsigned trans_count;
+   unsigned enqueue_count;
 
    struct
    {
@@ -532,8 +535,8 @@ static bool append_transfer(struct transfer_list *list, struct maru_transfer *tr
    return true;
 }
 
-#define LIBMARU_MAX_ENQUEUE_COUNT 64
-#define LIBMARU_MAX_ENQUEUE_TRANSFERS 2
+#define LIBMARU_MAX_ENQUEUE_COUNT 32
+#define LIBMARU_MAX_ENQUEUE_TRANSFERS 4
 
 static struct maru_transfer *create_transfer(struct transfer_list *list, size_t required_buffer)
 {
@@ -561,20 +564,18 @@ static void transfer_stream_cb(struct libusb_transfer *trans)
    struct maru_transfer *transfer = trans->user_data;
    transfer->active = false;
 
-   ctx_lock(transfer->ctx);
-
    transfer->stream->trans_count--;
-   if (transfer->stream->fifo)
+
+   // If we are deiniting, we will die before this can be used.
+   if (!transfer->block)
    {
       poll_list_unblock(transfer->ctx->epfd,
             maru_fifo_read_notify_fd(transfer->stream->fifo),
             POLLIN);
+
+      if (maru_fifo_read_unlock(transfer->stream->fifo, &transfer->region) != LIBMARU_SUCCESS)
+         fprintf(stderr, "Error occured during read unlock!\n");
    }
-
-   if (transfer->stream->fifo)
-      maru_fifo_read_unlock(transfer->stream->fifo, &transfer->region);
-
-   ctx_unlock(transfer->ctx);
 
    if (trans->status == LIBUSB_TRANSFER_CANCELLED)
       return;
@@ -763,25 +764,14 @@ static void stream_chunk_size_finalize(struct maru_stream_internal *stream)
 
 static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream)
 {
-   ctx_lock(ctx);
-
-   // It is possible that an open stream was suddenly closed.
-   // If so, we can catch it here and ignore it.
-   if (!stream->fifo)
-   {
-      free_transfers_stream(ctx, stream);
-      goto end;
-   }
-
    size_t avail = maru_fifo_read_avail(stream->fifo);
 
    unsigned packet_len[LIBMARU_MAX_ENQUEUE_COUNT];
    unsigned packets = 0;
    size_t total_write = 0;
 
-
    size_t to_write = stream_chunk_size(stream);
-   while (avail >= to_write && packets < LIBMARU_MAX_ENQUEUE_COUNT)
+   while (avail >= to_write && packets < stream->enqueue_count)
    {
       total_write += to_write;
       packet_len[packets++] = to_write;
@@ -790,21 +780,23 @@ static void handle_stream(maru_context *ctx, struct maru_stream_internal *stream
       to_write = stream_chunk_size(stream);
    }
 
-   struct maru_fifo_locked_region region;
-   maru_fifo_read_lock(stream->fifo, total_write,
-         &region);
+   if (packets)
+   {
+      struct maru_fifo_locked_region region;
+      maru_fifo_read_lock(stream->fifo, total_write,
+            &region);
 
-   if (!enqueue_transfer(ctx, stream, &region, packet_len, packets))
-      fprintf(stderr, "Enqueue transfer failed!\n");
+      if (!enqueue_transfer(ctx, stream, &region, packet_len, packets))
+         fprintf(stderr, "Enqueue transfer failed!\n");
+   }
 
+   // We are being killed, kill all transfers and tell other thread it's safe to deinit.
    if (maru_fifo_read_notify_ack(stream->fifo) != LIBMARU_SUCCESS)
    {
       free_transfers_stream(ctx, stream);
       epoll_ctl(ctx->epfd, EPOLL_CTL_DEL, maru_fifo_read_notify_fd(stream->fifo), NULL);
+      eventfd_write(stream->sync_fd, 1);
    }
-
-end:
-   ctx_unlock(ctx);
 }
 
 static void free_transfers_stream(maru_context *ctx,
@@ -1021,6 +1013,7 @@ static bool add_stream(maru_context *ctx, unsigned stream_ep, unsigned feedback_
    ctx->streams[ctx->num_streams] = (struct maru_stream_internal) {
       .stream_ep = stream_ep,
       .feedback_ep = feedback_ep,
+      .sync_fd = -1,
    };
 
    ctx->num_streams++;
@@ -1033,6 +1026,10 @@ static bool init_stream_nolock(maru_context *ctx,
 {
    struct maru_stream_internal *str = &ctx->streams[stream];
 
+   str->sync_fd = eventfd(0, 0);
+   if (str->sync_fd < 0)
+      return false;
+
    if (str->feedback_ep && !enqueue_feedback_transfer(ctx, str))
       return false;
 
@@ -1044,6 +1041,13 @@ static bool init_stream_nolock(maru_context *ctx,
    size_t frag_size = desc->fragment_size;
    if (!frag_size)
       frag_size = buffer_size >> 2;
+
+   size_t frame_size = desc->sample_rate * desc->channels * desc->bits / 8;
+   frame_size /= 1000;
+
+   str->enqueue_count = frag_size / frame_size + 1;
+   if (str->enqueue_count > LIBMARU_MAX_ENQUEUE_COUNT)
+      str->enqueue_count = LIBMARU_MAX_ENQUEUE_COUNT;
 
    str->fifo = maru_fifo_new(buffer_size);
    if (!str->fifo)
@@ -1092,11 +1096,14 @@ static void deinit_stream_nolock(maru_context *ctx, maru_stream stream)
 {
    struct maru_stream_internal *str = &ctx->streams[stream];
 
+   if (str->sync_fd >= 0)
+   {
+      close(str->sync_fd);
+      str->sync_fd = -1;
+   }
+
    if (str->fifo)
    {
-      poll_list_remove(ctx->epfd,
-            maru_fifo_read_notify_fd(str->fifo));
-
       maru_fifo_free(str->fifo);
       str->fifo = NULL;
    }
@@ -1543,20 +1550,22 @@ end:
 maru_error maru_stream_close(maru_context *ctx,
       maru_stream stream)
 {
-   maru_error ret = LIBMARU_SUCCESS;
-   ctx_lock(ctx);
+   if (maru_is_stream_available(ctx, stream) != 0)
+      return LIBMARU_ERROR_INVALID;
 
-   if (maru_is_stream_available_nolock(ctx, stream) != 0)
-   {
-      ret = LIBMARU_ERROR_INVALID;
-      goto end;
-   }
+   // Unblock so we make sure epoll_wait() catches our notification kill.
+   poll_list_unblock(ctx->epfd,
+         maru_fifo_read_notify_fd(ctx->streams[stream].fifo),
+         POLLIN);
+
+   // Wait till thread has acknowledged our close.
+   maru_fifo_kill_notification(ctx->streams[stream].fifo);
+   uint64_t dummy;
+   eventfd_read(ctx->streams[stream].sync_fd, &dummy);
 
    deinit_stream_nolock(ctx, stream);
 
-end:
-   ctx_unlock(ctx);
-   return ret;
+   return LIBMARU_SUCCESS;
 }
 
 static maru_usec current_time(void)
@@ -1805,6 +1814,9 @@ maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream)
    // Timed latency. May or may not be correct.
    maru_usec timer_latency = timed_latency(str);
 
+   if (timer_latency < 0)
+      timer_latency = 0;
+
 #define MAX_USEC_DEVIATION 50000
    // Timer is completely off, just reset it.
    if (timer_latency < 0 ||
@@ -1813,18 +1825,20 @@ maru_usec maru_stream_current_latency(maru_context *ctx, maru_stream stream)
    {
       init_timer(str);
       str->timer.offset = buffer_latency;
+      fprintf(stderr, "Resetting latency ...\n");
+      fprintf(stderr, "Timer latency = %lld, Buffer latency = %lld\n", (long long)timer_latency, (long long)buffer_latency);
       return buffer_latency;
    }
 
-#define JITTER_USEC_DEVIATION 10000
+#define JITTER_USEC_ADJUSTMENT 200
    // Adjust slowly over time.
    //
    // Estimated latency is larger than possible, adjust it down.
    if (timer_latency > buffer_latency)
-      str->timer.offset -= 500;
+      str->timer.offset -= JITTER_USEC_ADJUSTMENT;
    // Estimated latency is likely (we can't know for sure) too low, adjust it upwards.
-   else if (buffer_latency > timer_latency + JITTER_USEC_DEVIATION)
-      str->timer.offset += 500;
+   else if (buffer_latency > timer_latency + str->enqueue_count * 1000)
+      str->timer.offset += JITTER_USEC_ADJUSTMENT;
 
    return timer_latency;
 }
