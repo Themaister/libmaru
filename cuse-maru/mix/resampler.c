@@ -28,7 +28,7 @@ static void init_sinc_table(struct maru_resampler *resamp)
       for (unsigned j = 0; j < SIDELOBES; j++)
       {
          double sinc_phase = M_PI * ((double)i / PHASES + (double)j);
-         resamp->phase_table[i][j] = sinc(sinc_phase) * sinc(sinc_phase / SIDELOBES); // Kaiser window
+         resamp->phase_table[i][j] = sinc(sinc_phase) * sinc(sinc_phase / SIDELOBES); // Lanczos window.
       }
    }
 
