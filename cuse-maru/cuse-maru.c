@@ -21,6 +21,9 @@
 static maru_context *g_ctx;
 static maru_volume g_min_volume;
 static maru_volume g_max_volume;
+static int g_sample_rate;
+static int g_frags;
+static int g_fragsize;
 
 struct stream_info
 {
@@ -77,13 +80,13 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
    pthread_mutex_init(&stream_info->lock, NULL);
 
    // Just set some defaults.
-   stream_info->sample_rate = 48000;
+   stream_info->sample_rate = g_sample_rate;
    stream_info->channels = 2;
    stream_info->bits = 16;
    stream_info->stream = LIBMARU_STREAM_MASTER; // Invalid stream for writing.
 
-   stream_info->fragsize = 4096;
-   stream_info->frags = 8;
+   stream_info->fragsize = g_fragsize;
+   stream_info->frags = g_frags;
 
    info->nonseekable = 1;
    info->direct_io = 1;
@@ -579,6 +582,10 @@ struct maru_param
    unsigned major;
    unsigned minor;
    char *dev_name;
+
+   unsigned hw_frags;
+   unsigned hw_fragsize;
+   unsigned hw_rate;
 };
 
 static const struct fuse_opt maru_opts[] = {
@@ -588,6 +595,9 @@ static const struct fuse_opt maru_opts[] = {
    MARU_OPT("--min=%u", minor),
    MARU_OPT("-n %s", dev_name),
    MARU_OPT("--name=%s", dev_name),
+   MARU_OPT("--hw-frags=%u", hw_frags),
+   MARU_OPT("--hw-fragsize=%u", hw_fragsize),
+   MARU_OPT("--hw-rate=%u", hw_rate),
    FUSE_OPT_KEY("-h", 0),
    FUSE_OPT_KEY("--help", 0),
    FUSE_OPT_KEY("-D", 1),
@@ -601,6 +611,9 @@ static void print_help(void)
    fprintf(stderr, "\t-M major, --maj=major\n");
    fprintf(stderr, "\t-m minor, --min=minor\n");
    fprintf(stderr, "\t-n name, --name=name (default: maru)\n");
+   fprintf(stderr, "\t--hw-frags=frags (default: 4)\n");
+   fprintf(stderr, "\t--hw-fragsize=fragsize (default: 4096)\n");
+   fprintf(stderr, "\t--hw-rate=rate (default: 48000)\n");
    fprintf(stderr, "\t-D, --daemon, run in background\n");
    fprintf(stderr, "\t\tDevice will be created in /dev/$name.\n");
    fprintf(stderr, "\n");
@@ -632,7 +645,11 @@ static const struct cuse_lowlevel_ops maru_op = {
 int main(int argc, char *argv[])
 {
    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-   struct maru_param param = {0}; 
+   struct maru_param param = {
+      .hw_frags = 4,
+      .hw_fragsize = 4096,
+      .hw_rate = 48000,
+   };
 
    char dev_name[128] = {0};
    const char *dev_info_argv[] = { dev_name };
@@ -643,6 +660,10 @@ int main(int argc, char *argv[])
       return 1;
    }
    fuse_opt_add_arg(&args, "-f");
+
+   g_frags = param.hw_frags;
+   g_fragsize = param.hw_fragsize;
+   g_sample_rate = param.hw_rate;
 
    snprintf(dev_name, sizeof(dev_name), "DEVNAME=%s", param.dev_name ? param.dev_name : "maru");
 

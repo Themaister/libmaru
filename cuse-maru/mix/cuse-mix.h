@@ -46,6 +46,9 @@ struct global
       int channels;
       int bits;
       int format;
+
+      unsigned hw_frags;
+      unsigned hw_fragsize;
    } format;
 
 #define MAX_STREAMS 16
