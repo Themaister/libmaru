@@ -169,6 +169,13 @@ static bool init_stream(struct stream_info *stream_info)
    if (!fifo)
       return false;
 
+   stream_info->sync_fd = eventfd(0, 0);
+   if (stream_info->sync_fd < 0)
+   {
+      maru_fifo_free(fifo);
+      return false;
+   }
+
    maru_fifo_set_read_trigger(fifo, g_state.format.fragsize);
 
    if (stream_info->sample_rate != g_state.format.sample_rate)
@@ -181,7 +188,9 @@ static bool init_stream(struct stream_info *stream_info)
    else
       stream_info->src_active = false;
 
-   int ret = epoll_ctl(g_state.epfd, EPOLL_CTL_ADD, maru_fifo_read_notify_fd(fifo),
+   stream_info->fifo = fifo;
+
+   epoll_ctl(g_state.epfd, EPOLL_CTL_ADD, maru_fifo_read_notify_fd(fifo),
          &(struct epoll_event) {
             .events = POLLIN,
             .data = {
@@ -189,12 +198,6 @@ static bool init_stream(struct stream_info *stream_info)
             }
          });
 
-   if (ret < 0)
-      return false;
-
-   global_lock();
-   stream_info->fifo = fifo;
-   global_unlock();
    return true;
 }
 
@@ -204,12 +207,13 @@ static void reset_stream(struct stream_info *stream_info)
    if (!fifo)
       return;
 
-   epoll_ctl(g_state.epfd, EPOLL_CTL_DEL, maru_fifo_read_notify_fd(fifo), NULL);
+   maru_fifo_kill_notification(fifo);
+   uint64_t dummy;
+   eventfd_read(stream_info->sync_fd, &dummy);
+   close(stream_info->sync_fd);
+   stream_info->sync_fd = -1;
 
-   global_lock();
    stream_info->fifo = NULL;
-   global_unlock();
-
    maru_fifo_free(fifo);
 
    eventfd_write(g_state.ping_fd, 1);
@@ -244,6 +248,18 @@ static void maru_update_pollhandle(struct stream_info *info, struct fuse_pollhan
    info->ph = ph;
    if (tmp_ph)
       fuse_pollhandle_destroy(tmp_ph);
+}
+
+void stream_poll_signal(struct stream_info *info)
+{
+   global_lock();
+   if (info->ph)
+   {
+      fuse_lowlevel_notify_poll(info->ph);
+      fuse_pollhandle_destroy(info->ph);
+      info->ph = NULL;
+   }
+   global_unlock();
 }
 
 static void maru_poll(fuse_req_t req, struct fuse_file_info *info,
@@ -634,10 +650,11 @@ static void maru_release(fuse_req_t req, struct fuse_file_info *info)
    int vol = stream_info->volume;
    float vol_f = stream_info->volume_f;
 
+   global_lock();
    memset(stream_info, 0, sizeof(*stream_info));
-
    stream_info->volume = vol;
    stream_info->volume_f = vol_f;
+   global_unlock();
 
    fuse_reply_err(req, 0);
 }

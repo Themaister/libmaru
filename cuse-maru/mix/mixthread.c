@@ -44,7 +44,6 @@ static void mix_streams(const struct epoll_event *events, size_t num_events,
 
    memset(mix_buffer_f, 0, sizeof(mix_buffer_f));
 
-   global_lock();
    for (unsigned i = 0; i < num_events; i++)
    {
       memset(tmp_mix_buffer_f, 0, sizeof(tmp_mix_buffer_f));
@@ -59,32 +58,36 @@ static void mix_streams(const struct epoll_event *events, size_t num_events,
          continue;
       }
 
-      if (info->fifo)
+      if (info->src_active)
       {
-         if (info->src_active)
-         {
-            size_t has_read = resampler_process(&info->src,
-                  tmp_mix_buffer_f,
-                  samples / info->channels);
+         size_t has_read = resampler_process(&info->src,
+               tmp_mix_buffer_f,
+               samples / info->channels);
 
+         info->write_cnt += has_read;
+      }
+      else
+      {
+         ssize_t has_read = maru_fifo_read(info->fifo, tmp_mix_buffer_i, fragsize);
+
+         if (has_read > 0)
             info->write_cnt += has_read;
-         }
-         else
-         {
-            ssize_t has_read = maru_fifo_read(info->fifo, tmp_mix_buffer_i, fragsize);
 
-            if (has_read > 0)
-               info->write_cnt += has_read;
+         audio_convert_s16_to_float(tmp_mix_buffer_f, tmp_mix_buffer_i, samples);
+      }
 
-            audio_convert_s16_to_float(tmp_mix_buffer_f, tmp_mix_buffer_i, samples);
-         }
+      stream_poll_signal(info);
 
-         maru_fifo_read_notify_ack(info->fifo);
+      if (maru_fifo_read_notify_ack(info->fifo) != LIBMARU_SUCCESS)
+      {
+         epoll_ctl(g_state.epfd, EPOLL_CTL_DEL,
+               maru_fifo_read_notify_fd(info->fifo), NULL);
+
+         eventfd_write(info->sync_fd, 1);
       }
 
       audio_mix_volume(mix_buffer_f, tmp_mix_buffer_f, info->volume_f, samples);
    }
-   global_unlock();
 
    audio_convert_float_to_s16(mix_buffer, mix_buffer_f, samples);
 }

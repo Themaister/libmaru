@@ -14,6 +14,7 @@ struct stream_info
    char process_name[256];
 
    struct fuse_pollhandle *ph;
+   int sync_fd;
 
    int sample_rate;
    int channels;
@@ -61,6 +62,8 @@ extern struct global g_state;
 
 void global_lock(void);
 void global_unlock(void);
+
+void stream_poll_signal(struct stream_info *info);
 
 #endif
 
