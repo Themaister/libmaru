@@ -180,13 +180,15 @@ static bool init_stream(struct stream_info *stream_info)
 
    if (stream_info->sample_rate != g_state.format.sample_rate)
    {
-      resampler_init(&stream_info->src, fifo,
+      stream_info->src = resampler_init(fifo,
             stream_info->sample_rate, g_state.format.sample_rate);
 
-      stream_info->src_active = true;
+      if (!stream_info->src)
+      {
+         maru_fifo_free(fifo);
+         return false;
+      }
    }
-   else
-      stream_info->src_active = false;
 
    stream_info->fifo = fifo;
 
@@ -217,6 +219,12 @@ static void reset_stream(struct stream_info *stream_info)
    maru_fifo_free(fifo);
 
    eventfd_write(g_state.ping_fd, 1);
+
+   if (stream_info->src)
+   {
+      resampler_free(stream_info->src);
+      stream_info->src = NULL;
+   }
 }
 
 static void maru_write(fuse_req_t req, const char *data, size_t size,

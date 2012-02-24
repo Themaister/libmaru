@@ -3,7 +3,6 @@
 
 #include "../../fifo.h"
 
-#define ALIGNED __attribute__((aligned(16)))
 #define PHASE_BITS 8
 #define SUBPHASE_BITS 16
 
@@ -17,23 +16,17 @@
 #define FRAMES_SHIFT (PHASE_BITS + SUBPHASE_BITS)
 
 #define SIDELOBES 8
+#define TAPS (SIDELOBES * 2)
 
-struct maru_resampler
-{
-   float phase_table[PHASES + 1][SIDELOBES] ALIGNED;
-   float delta_table[PHASES + 1][SIDELOBES] ALIGNED;
-   float buffer_l[2 * SIDELOBES] ALIGNED;
-   float buffer_r[2 * SIDELOBES] ALIGNED;
+#define PHASE_INDEX 0
+#define DELTA_INDEX 1
 
-   uint32_t ratio;
-   uint32_t time;
+typedef struct maru_resampler maru_resampler_t;
 
-   maru_fifo *fifo;
-};
-
-void resampler_init(struct maru_resampler *resamp,
-      maru_fifo *fifo,
+maru_resampler_t *resampler_init(maru_fifo *fifo,
       unsigned in_rate, unsigned out_rate);
+
+void resampler_free(maru_resampler_t *resamp);
 
 size_t resampler_process(struct maru_resampler *resamp,
       float *data,

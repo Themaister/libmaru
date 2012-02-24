@@ -8,10 +8,27 @@
 #include <string.h>
 #include <stdint.h>
 #include <assert.h>
+#include <malloc.h>
 
 #if __SSE__
 #include <xmmintrin.h>
 #endif
+
+#if __SSE3__
+#include <pmmintrin.h>
+#endif
+
+struct maru_resampler
+{
+   float phase_table[PHASES + 1][2][4 * SIDELOBES];
+   float buffer_l[2 * SIDELOBES];
+   float buffer_r[2 * SIDELOBES];
+
+   uint32_t ratio;
+   uint32_t time;
+
+   maru_fifo *fifo;
+};
 
 static inline double sinc(double val)
 {
@@ -36,23 +53,30 @@ static inline double blackman(double index)
 
 static void init_sinc_table(struct maru_resampler *resamp)
 {
-   for (unsigned i = 0; i <= PHASES; i++)
+   // Sinc phases: [..., p + 3, p + 2, p + 1, p + 0, p - 1, p - 2, p - 3, p - 4, ...]
+   for (int i = 0; i < PHASES; i++)
    {
-      for (unsigned j = 0; j < SIDELOBES; j++)
+      for (int j = 0; j < 2 * SIDELOBES; j++)
       {
-         double sinc_phase = M_PI * ((double)i / PHASES + (double)j);
-         resamp->phase_table[i][j] = sinc(sinc_phase) * blackman(sinc_phase / SIDELOBES);
+         double p = (double)i / PHASES;
+         double sinc_phase = M_PI * (p + (SIDELOBES - 1 - j));
+         resamp->phase_table[i][PHASE_INDEX][j] = sinc(sinc_phase) * blackman(sinc_phase / SIDELOBES);
       }
    }
 
    // Optimize linear interpolation.
-   for (unsigned i = 0; i < PHASES; i++)
-      for (unsigned j = 0; j < SIDELOBES; j++)
-         resamp->delta_table[i][j] = resamp->phase_table[i + 1][j] - resamp->phase_table[i][j];
+   for (int i = 0; i < PHASES - 1; i++)
+   {
+      for (int j = 0; j < 2 * SIDELOBES; j++)
+      {
+         resamp->phase_table[i][DELTA_INDEX][j] =
+            (resamp->phase_table[i + 1][PHASE_INDEX][j] - resamp->phase_table[i][PHASE_INDEX][j]) / SUBPHASES;
+      }
+   }
 }
 
 #if __SSE__
-static void process_sinc(struct maru_resampler *resamp, float * restrict out_buffer)
+static void process_sinc(struct maru_resampler *resamp, void * restrict out_buffer)
 {
    __m128 sum_l = _mm_setzero_ps();
    __m128 sum_r = _mm_setzero_ps();
@@ -62,67 +86,43 @@ static void process_sinc(struct maru_resampler *resamp, float * restrict out_buf
 
    unsigned phase = resamp->time >> PHASES_SHIFT;
    unsigned delta = (resamp->time >> SUBPHASES_SHIFT) & SUBPHASES_MASK;
-   __m128 delta_f = _mm_set1_ps((float)delta / SUBPHASES);
+   __m128 delta_f = _mm_set1_ps(delta);
 
-   const float *phase_table = resamp->phase_table[phase];
-   const float *delta_table = resamp->delta_table[phase];
+   const float *phase_table = resamp->phase_table[phase][PHASE_INDEX];
+   const float *delta_table = resamp->phase_table[phase][DELTA_INDEX];
 
-   __m128 sinc_vals[SIDELOBES / 4];
-   for (unsigned i = 0; i < SIDELOBES; i += 4)
+   for (unsigned i = 0; i < TAPS; i += 4)
    {
-      __m128 phases    = _mm_load_ps(phase_table + i);
-      __m128 deltas    = _mm_load_ps(delta_table + i);
-      sinc_vals[i / 4] = _mm_add_ps(phases, _mm_mul_ps(deltas, delta_f));
+      __m128 buf_l  = _mm_load_ps(buffer_l + i);
+      __m128 buf_r  = _mm_load_ps(buffer_r + i);
+
+      __m128 phases = _mm_load_ps(phase_table + i);
+      __m128 deltas = _mm_load_ps(delta_table + i);
+
+      __m128 sinc   = _mm_add_ps(phases, _mm_mul_ps(deltas, delta_f));
+
+      sum_l         = _mm_add_ps(sum_l, _mm_mul_ps(buf_l, sinc));
+      sum_r         = _mm_add_ps(sum_r, _mm_mul_ps(buf_r, sinc));
    }
 
-   // Older data.
-   for (unsigned i = 0; i < SIDELOBES; i += 4)
-   {
-      __m128 buf_l = _mm_loadr_ps(buffer_l + SIDELOBES - 4 - i);
-      sum_l        = _mm_add_ps(sum_l, _mm_mul_ps(buf_l, sinc_vals[i / 4]));
-
-      __m128 buf_r = _mm_loadr_ps(buffer_r + SIDELOBES - 4 - i);
-      sum_r        = _mm_add_ps(sum_r, _mm_mul_ps(buf_r, sinc_vals[i / 4]));
-   }
-
-   // Newer data.
-   unsigned reverse_phase = PHASES_WRAP - resamp->time;
-   phase   = reverse_phase >> PHASES_SHIFT;
-   delta   = (reverse_phase >> SUBPHASES_SHIFT) & SUBPHASES_MASK;
-   delta_f = _mm_set1_ps((float)delta / SUBPHASES);
-
-   phase_table = resamp->phase_table[phase];
-   delta_table = resamp->delta_table[phase];
-
-   for (unsigned i = 0; i < SIDELOBES; i += 4)
-   {
-      __m128 phases    = _mm_load_ps(phase_table + i);
-      __m128 deltas    = _mm_load_ps(delta_table + i);
-      sinc_vals[i / 4] = _mm_add_ps(phases, _mm_mul_ps(deltas, delta_f));
-   }
-
-   for (unsigned i = 0; i < SIDELOBES; i += 4)
-   {
-      __m128 buf_l = _mm_load_ps(buffer_l + SIDELOBES + i);
-      sum_l        = _mm_add_ps(sum_l, _mm_mul_ps(buf_l, sinc_vals[i / 4]));
-
-      __m128 buf_r = _mm_load_ps(buffer_r + SIDELOBES + i);
-      sum_r        = _mm_add_ps(sum_r, _mm_mul_ps(buf_r, sinc_vals[i / 4]));
-   }
-
-   __m128 sum_shuf_l = _mm_shuffle_ps(sum_l, sum_r, _MM_SHUFFLE(1, 0, 1, 0));
-   __m128 sum_shuf_r = _mm_shuffle_ps(sum_l, sum_r, _MM_SHUFFLE(3, 2, 3, 2));
-   __m128 sum        = _mm_add_ps(sum_shuf_l, sum_shuf_r);
-
+#if __SSE3__
+   __m128 res = _mm_hadd_ps(_mm_hadd_ps(sum_l, sum_r), _mm_setzero_ps());
+   _mm_store_sd(out_buffer, (__m128d)res);
+#else // Meh, compiler should optimize this to something sane.
    union
    {
       float f[4];
       __m128 v;
-   } u;
-   u.v = sum;
+   } u[2] = {
+      [0] = { .v = sum_l },
+      [1] = { .v = sum_r },
+   };
 
-   out_buffer[0] = u.f[0] + u.f[1];
-   out_buffer[1] = u.f[2] + u.f[3];
+   float *buf = out_buffer;
+
+   buf[0] = u[0].f[0] + u[0].f[1] + u[0].f[2] + u[0].f[3];
+   buf[1] = u[1].f[0] + u[1].f[1] + u[1].f[2] + u[1].f[3];
+#endif
 }
 #else // Plain ol' C99
 static void process_sinc(struct maru_resampler *resamp, float * restrict out_buffer)
@@ -134,38 +134,16 @@ static void process_sinc(struct maru_resampler *resamp, float * restrict out_buf
 
    unsigned phase = resamp->time >> PHASES_SHIFT;
    unsigned delta = (resamp->time >> SUBPHASES_SHIFT) & SUBPHASES_MASK;
-   float delta_f = (float)delta / SUBPHASES;
+   float delta_f = (float)delta;
 
-   const float *phase_table = resamp->phase_table[phase];
-   const float *delta_table = resamp->delta_table[phase];
+   const float *phase_table = resamp->phase_table[phase][PHASE_INDEX];
+   const float *delta_table = resamp->phase_table[phase][DELTA_INDEX];
 
-   float sinc_vals[SIDELOBES];
-   for (unsigned i = 0; i < SIDELOBES; i++)
-      sinc_vals[i] = phase_table[i] + delta_f * delta_table[i];
-
-   // Older data.
-   for (unsigned i = 0; i < SIDELOBES; i++)
+   for (unsigned i = 0; i < TAPS; i++)
    {
-      sum_l += buffer_l[SIDELOBES - 1 - i] * sinc_vals[i];
-      sum_r += buffer_r[SIDELOBES - 1 - i] * sinc_vals[i];
-   }
-
-   // Newer data.
-   unsigned reverse_phase = PHASES_WRAP - resamp->time;
-   phase   = reverse_phase >> PHASES_SHIFT;
-   delta   = (reverse_phase >> SUBPHASES_SHIFT) & SUBPHASES_MASK;
-   delta_f = (float)delta / SUBPHASES;
-
-   phase_table = resamp->phase_table[phase];
-   delta_table = resamp->delta_table[phase];
-
-   for (unsigned i = 0; i < SIDELOBES; i++)
-      sinc_vals[i] = phase_table[i] + delta_f * delta_table[i];
-
-   for (unsigned i = 0; i < SIDELOBES; i++)
-   {
-      sum_l += buffer_l[SIDELOBES + i] * sinc_vals[i];
-      sum_r += buffer_r[SIDELOBES + i] * sinc_vals[i];
+      float sinc_val = phase_table[i] + delta_f * delta_table[i];
+      sum_l         += buffer_l[i] * sinc_val;
+      sum_r         += buffer_r[i] * sinc_val;
    }
 
    out_buffer[0] = sum_l;
@@ -228,16 +206,27 @@ size_t resampler_process(struct maru_resampler *resamp, float *data, size_t fram
    return avail;
 }
 
-
-void resampler_init(struct maru_resampler *resamp,
-      maru_fifo *fifo,
+maru_resampler_t *resampler_init(maru_fifo *fifo,
       unsigned in_rate, unsigned out_rate)
 {
+   maru_resampler_t *resamp = memalign(16, sizeof(*resamp));
+   if (!resamp)
+      return NULL;
+
+   memset(resamp, 0, sizeof(*resamp));
+
    resamp->ratio = ((uint64_t)PHASES_WRAP * in_rate) / out_rate;
    resamp->fifo = fifo;
    resamp->time = 0;
    init_sinc_table(resamp);
    memset(resamp->buffer_l, 0, sizeof(resamp->buffer_l));
    memset(resamp->buffer_r, 0, sizeof(resamp->buffer_r));
+
+   return resamp;
+}
+
+void resampler_free(maru_resampler_t *resamp)
+{
+   free(resamp);
 }
 

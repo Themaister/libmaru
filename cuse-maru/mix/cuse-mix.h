@@ -29,8 +29,7 @@ struct stream_info
 
    bool nonblock;
 
-   bool src_active;
-   struct maru_resampler src;
+   maru_resampler_t *src;
 };
 
 struct global

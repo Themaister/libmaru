@@ -58,9 +58,9 @@ static void mix_streams(const struct epoll_event *events, size_t num_events,
          continue;
       }
 
-      if (info->src_active)
+      if (info->src)
       {
-         size_t has_read = resampler_process(&info->src,
+         size_t has_read = resampler_process(info->src,
                tmp_mix_buffer_f,
                samples / info->channels);
 
