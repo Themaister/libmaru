@@ -18,6 +18,24 @@
 #include <pmmintrin.h>
 #endif
 
+#define PHASE_BITS 8
+#define SUBPHASE_BITS 16
+
+#define PHASES (1 << PHASE_BITS)
+#define PHASES_SHIFT (SUBPHASE_BITS)
+#define PHASES_MASK ((PHASES << 1) - 1)
+#define SUBPHASES (1 << SUBPHASE_BITS)
+#define SUBPHASES_SHIFT 0
+#define SUBPHASES_MASK ((1 << SUBPHASE_BITS) - 1)
+#define PHASES_WRAP (1 << (PHASE_BITS + SUBPHASE_BITS))
+#define FRAMES_SHIFT (PHASE_BITS + SUBPHASE_BITS)
+
+#define SIDELOBES 16
+#define TAPS (SIDELOBES * 2)
+
+#define PHASE_INDEX 0
+#define DELTA_INDEX 1
+
 struct maru_resampler
 {
    float phase_table[PHASES + 1][2][4 * SIDELOBES];
@@ -72,6 +90,17 @@ static void init_sinc_table(struct maru_resampler *resamp)
          resamp->phase_table[i][DELTA_INDEX][j] =
             (resamp->phase_table[i + 1][PHASE_INDEX][j] - resamp->phase_table[i][PHASE_INDEX][j]) / SUBPHASES;
       }
+   }
+
+   // Interpolation between [PHASES - 1] => [PHASES] 
+   for (int j = 0; j < TAPS; j++)
+   {
+      double p = 1.0;
+      double sinc_phase = M_PI * (p + (SIDELOBES - 1 - j));
+      double phase = sinc(sinc_phase) * blackman(sinc_phase / SIDELOBES);
+
+      float result = (phase - resamp->phase_table[PHASES - 1][PHASE_INDEX][j]) / SUBPHASES;
+      resamp->phase_table[PHASES - 1][DELTA_INDEX][j] = result;
    }
 }
 
