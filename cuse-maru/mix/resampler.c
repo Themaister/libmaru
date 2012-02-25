@@ -14,10 +14,6 @@
 #include <xmmintrin.h>
 #endif
 
-#if __SSE3__
-#include <pmmintrin.h>
-#endif
-
 #define PHASE_BITS 8
 #define SUBPHASE_BITS 16
 
@@ -126,24 +122,26 @@ static void process_sinc(struct maru_resampler *resamp, void * restrict out_buff
       sum_r         = _mm_add_ps(sum_r, _mm_mul_ps(buf_r, sinc));
    }
 
-#if __SSE3__
-   __m128 res = _mm_hadd_ps(_mm_hadd_ps(sum_l, sum_r), _mm_setzero_ps());
-   _mm_store_sd(out_buffer, (__m128d)res);
-#else // Meh, compiler should optimize this to something sane.
-   union
-   {
-      float f[4];
-      __m128 v;
-   } u[2] = {
-      [0] = { .v = sum_l },
-      [1] = { .v = sum_r },
-   };
+   // Them annoying shuffles :V
+   // sum_l = { l3, l2, l1, l0 }
+   // sum_r = { r3, r2, r1, r0 }
 
-   float *buf = out_buffer;
+   __m128 sum = _mm_add_ps(_mm_shuffle_ps(sum_l, sum_r, _MM_SHUFFLE(1, 0, 1, 0)),
+         _mm_shuffle_ps(sum_l, sum_r, _MM_SHUFFLE(3, 2, 3, 2)));
 
-   buf[0] = u[0].f[0] + u[0].f[1] + u[0].f[2] + u[0].f[3];
-   buf[1] = u[1].f[0] + u[1].f[1] + u[1].f[2] + u[1].f[3];
-#endif
+   // sum   = { r1, r0, l1, l0 } + { r3, r2, l3, l2 }
+   // sum   = { R1, R0, L1, L0 }
+
+   sum        = _mm_add_ps(_mm_shuffle_ps(sum, sum, _MM_SHUFFLE(3, 3, 1, 1)), sum);
+
+   // sum   = {R1, R1, L1, L1 } + { R1, R0, L1, L0 }
+   // sum   = { X,  R,  X,  L } 
+
+   // Store L
+   _mm_store_ss(out_buffer + 0, sum);
+
+   // movehl { X, R, X, L } == { X, R, X, R }
+   _mm_store_ss(out_buffer + 1, _mm_movehl_ps(sum, sum));
 }
 #else // Plain ol' C99
 static void process_sinc(struct maru_resampler *resamp, float * restrict out_buffer)
