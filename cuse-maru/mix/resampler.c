@@ -93,7 +93,7 @@ static void init_sinc_table(struct maru_resampler *resamp)
 }
 
 #if __SSE__
-static void process_sinc(struct maru_resampler *resamp, void * restrict out_buffer)
+static void process_sinc(struct maru_resampler *resamp, float * restrict out_buffer)
 {
    __m128 sum_l = _mm_setzero_ps();
    __m128 sum_r = _mm_setzero_ps();
