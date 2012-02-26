@@ -26,8 +26,9 @@
 #define PHASES_WRAP (1 << (PHASE_BITS + SUBPHASE_BITS))
 #define FRAMES_SHIFT (PHASE_BITS + SUBPHASE_BITS)
 
-#define SIDELOBES 16
+#define SIDELOBES 32
 #define TAPS (SIDELOBES * 2)
+#define CUTOFF 0.9
 
 #define PHASE_INDEX 0
 #define DELTA_INDEX 1
@@ -66,7 +67,7 @@ static void init_sinc_table(struct maru_resampler *resamp)
       {
          double p = (double)i / PHASES;
          double sinc_phase = M_PI * (p + (SIDELOBES - 1 - j));
-         resamp->phase_table[i][PHASE_INDEX][j] = sinc(sinc_phase) * lanzcos(sinc_phase / SIDELOBES);
+         resamp->phase_table[i][PHASE_INDEX][j] = CUTOFF * sinc(CUTOFF * sinc_phase) * lanzcos(sinc_phase / SIDELOBES);
       }
    }
 
@@ -85,7 +86,7 @@ static void init_sinc_table(struct maru_resampler *resamp)
    {
       double p = 1.0;
       double sinc_phase = M_PI * (p + (SIDELOBES - 1 - j));
-      double phase = sinc(sinc_phase) * lanzcos(sinc_phase / SIDELOBES);
+      double phase = CUTOFF * sinc(CUTOFF * sinc_phase) * lanzcos(sinc_phase / SIDELOBES);
 
       float result = (phase - resamp->phase_table[PHASES - 1][PHASE_INDEX][j]) / SUBPHASES;
       resamp->phase_table[PHASES - 1][DELTA_INDEX][j] = result;
