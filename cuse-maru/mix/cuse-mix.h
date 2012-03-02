@@ -3,7 +3,6 @@
 
 #include "../../fifo.h"
 #include "resampler.h"
-#include "eq.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <samplerate.h>
@@ -56,8 +55,6 @@ struct global
 
 #define MAX_STREAMS 16
    struct stream_info stream_info[MAX_STREAMS];
-
-   maru_eq_t *eq;
 };
 
 extern struct global g_state;

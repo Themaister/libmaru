@@ -89,7 +89,6 @@ static void mix_streams(const struct epoll_event *events, size_t num_events,
       audio_mix_volume(mix_buffer_f, tmp_mix_buffer_f, info->volume_f, samples);
    }
 
-   //maru_eq_process(g_state.eq, mix_buffer_f, samples / g_state.format.channels);
    audio_convert_float_to_s16(mix_buffer, mix_buffer_f, samples);
 }
 
