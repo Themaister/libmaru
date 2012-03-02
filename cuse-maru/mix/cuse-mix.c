@@ -789,6 +789,10 @@ static bool init_cuse_mix(const char *sink_name)
       g_state.stream_info[i].volume_f = 1.0f;
    }
 
+   //g_state.eq = maru_eq_new(512);
+   //if (!g_state.eq)
+   //   return false;
+
    if (!start_mix_thread())
       return false;
 
