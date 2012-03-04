@@ -158,9 +158,18 @@ static void maru_write(fuse_req_t req, const char *data, size_t size, off_t off,
 
    bool nonblock = info->flags & O_NONBLOCK || stream_info->nonblock;
 
-   size_t to_write = size;
+   size_t to_write;
    if (nonblock)
+   {
       to_write = maru_stream_write_avail(g_ctx, stream_info->stream);
+      unsigned frame_size = stream_info->channels * stream_info->bits / 8;
+      to_write /= frame_size;
+      to_write *= frame_size;
+      if (to_write > size)
+         to_write = size;
+   }
+   else
+      to_write = size;
 
    if (to_write == 0)
    {

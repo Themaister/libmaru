@@ -242,7 +242,9 @@ static void maru_write(fuse_req_t req, const char *data, size_t size,
    if ((info->flags & O_NONBLOCK) || stream_info->nonblock)
    {
       size_t avail = maru_fifo_write_avail(stream_info->fifo);
-      avail &= ~(stream_info->channels * stream_info->bits / 8 - 1);
+      unsigned frame_size = stream_info->channels * stream_info->bits / 8;
+      avail /= frame_size;
+      avail *= frame_size;
       if (size > avail)
          size = avail;
       ret = maru_fifo_write(stream_info->fifo, data, size);
