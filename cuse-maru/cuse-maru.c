@@ -1,4 +1,5 @@
 #include <libmaru.h>
+#include "utils.h"
 
 #include <sys/soundcard.h>
 #include <cuse_lowlevel.h>
@@ -255,7 +256,6 @@ static bool ioctl_prep_uarg(fuse_req_t req,
 #define PREP_UARG_OUT(outp) PREP_UARG(NULL, 0, outp, sizeof(*(outp)))
 #define PREP_UARG_INOUT(inp, outp) PREP_UARG(inp, sizeof(*(inp)), outp, sizeof(*(outp)))
 
-
 static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       struct fuse_file_info *info, unsigned flags,
       const void *in_buf, size_t in_bufsize, size_t out_bufsize)
@@ -406,7 +406,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          }
 
          stream_info->fragsize = fragsize;
-         stream_info->frags    = frags;
+         stream_info->frags    = next_pot(frags);
 
          IOCTL_RETURN(&i);
          break;
@@ -671,8 +671,8 @@ int main(int argc, char *argv[])
    }
    fuse_opt_add_arg(&args, "-f");
 
-   g_frags = param.hw_frags;
-   g_fragsize = param.hw_fragsize;
+   g_frags = next_pot(param.hw_frags);
+   g_fragsize = next_pot(param.hw_fragsize);
    g_sample_rate = param.hw_rate;
 
    snprintf(dev_name, sizeof(dev_name), "DEVNAME=%s", param.dev_name ? param.dev_name : "maru");

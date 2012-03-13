@@ -1,4 +1,5 @@
 #include "../../fifo.h"
+#include "../utils.h"
 #include "cuse-mix.h"
 #include "mixthread.h"
 #include "control.h"
@@ -165,7 +166,6 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
 
 static bool init_stream(struct stream_info *stream_info)
 {
-   // FIXME: stream_info->frags must be POT.
    maru_fifo *fifo = maru_fifo_new(stream_info->frags * stream_info->fragsize);
    if (!fifo)
       return false;
@@ -528,7 +528,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          }
 
          stream_info->fragsize = fragsize;
-         stream_info->frags    = frags;
+         stream_info->frags    = next_pot(frags);
 
          IOCTL_RETURN(&i);
          break;
@@ -826,10 +826,10 @@ int main(int argc, char *argv[])
    }
    fuse_opt_add_arg(&args, "-f");
 
-   g_state.format.hw_frags    = param.hw_frags;
-   g_state.format.hw_fragsize = param.hw_fragsize;
-   g_state.format.sw_frags    = param.sw_frags;
-   g_state.format.sw_fragsize = param.sw_fragsize;
+   g_state.format.hw_frags    = next_pot(param.hw_frags);
+   g_state.format.hw_fragsize = next_pot(param.hw_fragsize);
+   g_state.format.sw_frags    = next_pot(param.sw_frags);
+   g_state.format.sw_fragsize = next_pot(param.sw_fragsize);
    g_state.format.sample_rate = param.hw_rate;
 
    snprintf(dev_name, sizeof(dev_name), "DEVNAME=%s",
