@@ -20,35 +20,50 @@
 #define MAX_STREAMS 8
 
 static maru_context *g_ctx;
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static maru_volume g_min_volume;
 static maru_volume g_max_volume;
 static int g_sample_rate;
 static int g_frags;
 static int g_fragsize;
 
-struct stream_info
+/** \ingroup internal
+ * \brief Structure holding information about a libmaru stream. */
+struct cuse_stream_info
 {
+   /** Set to true if stream is claimed by a file descriptor. */
    bool active;
 
+   /** libmaru stream. Set to LIBMARU_STREAM_MASTER during configuration stage (before first write()). */
    maru_stream stream;
+   /** Lock to let polling notifications occur in a different thread. */
    pthread_mutex_t lock;
+   /** Currently held pollhandle. */
    struct fuse_pollhandle *ph;
 
+   /** Set if stream has an error. */
    volatile sig_atomic_t error;
 
+   /** Current sample rate for stream. */
    int sample_rate;
+   /** Current number of audio channels for stream. */
    int channels;
+   /** Current number of bits in the little-endian PCM format. */
    int bits;
 
+   /** HW fragment size. */
    int fragsize;
+   /** HW frags. */
    int frags;
 
+   /** Set if SNDCTL_DSP_NONBLOCK has been explicitly called. */
    bool nonblock;
 
+   /** Number of bytes written to current stream. (Wraps around at 2^32 according to OSS API). */
    uint32_t write_cnt;
 };
 
-static struct stream_info g_stream_info[MAX_STREAMS];
+static struct cuse_stream_info g_stream_info[MAX_STREAMS];
 
 static void maru_open(fuse_req_t req, struct fuse_file_info *info)
 {
@@ -59,6 +74,7 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
    }
 
    bool found = false;
+   pthread_mutex_lock(&g_lock);
    for (unsigned i = 0; i < MAX_STREAMS; i++)
    {
       if (!g_stream_info[i].active)
@@ -69,6 +85,7 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
          break;
       }
    }
+   pthread_mutex_unlock(&g_lock);
 
    if (!found)
    {
@@ -76,7 +93,7 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
       return;
    }
 
-   struct stream_info *stream_info = &g_stream_info[info->fh];
+   struct cuse_stream_info *stream_info = &g_stream_info[info->fh];
 
    pthread_mutex_init(&stream_info->lock, NULL);
 
@@ -96,7 +113,7 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
 
 static void write_notification_cb(void *data)
 {
-   struct stream_info *info = data;
+   struct cuse_stream_info *info = data;
    pthread_mutex_lock(&info->lock);
 
    if (info->ph)
@@ -109,7 +126,7 @@ static void write_notification_cb(void *data)
    pthread_mutex_unlock(&info->lock);
 }
 
-static bool init_stream(struct stream_info *info)
+static bool init_stream(struct cuse_stream_info *info)
 {
    int stream = maru_find_available_stream(g_ctx);
    if (stream < 0)
@@ -136,7 +153,7 @@ static bool init_stream(struct stream_info *info)
 static void maru_write(fuse_req_t req, const char *data, size_t size, off_t off,
       struct fuse_file_info *info)
 {
-   struct stream_info *stream_info = &g_stream_info[info->fh];
+   struct cuse_stream_info *stream_info = &g_stream_info[info->fh];
 
    if (stream_info->error)
    {
@@ -189,10 +206,14 @@ static void maru_write(fuse_req_t req, const char *data, size_t size, off_t off,
    }
 }
 
-// Almost straight copypasta from OSS Proxy.
-// It seems that memory is mapped directly between two different processes.
-// Since ioctl() does not contain any size information for its arguments, we first have to tell it how much
-// memory we want to map between the two different processes, then ask it to call ioctl() again.
+/** \ingroup cuse
+ * \brief Verify mapping between cuse and userspace, and retry if not present.
+ *
+ * Almost straight copypasta from OSS Proxy.
+ * It seems that memory is mapped directly between two different processes.
+ * Since ioctl() does not contain any size information for its arguments, we first have to tell it how much
+ * memory we want to map between the two different processes, then ask it to call ioctl() again.
+ */
 static bool ioctl_prep_uarg(fuse_req_t req,
       void *in, size_t in_size,
       void *out, size_t out_size,
@@ -200,8 +221,8 @@ static bool ioctl_prep_uarg(fuse_req_t req,
       const void *in_buf, size_t in_bufsize, size_t out_bufsize)
 {
    bool retry = false;
-   struct iovec in_iov = {0};
-   struct iovec out_iov = {0};
+   struct iovec in_iov = {};
+   struct iovec out_iov = {};
 
    if (in)
    {
@@ -227,9 +248,7 @@ static bool ioctl_prep_uarg(fuse_req_t req,
          retry = true;
       }
       else
-      {
          assert(out_bufsize == out_size);
-      }
    }
 
    if (retry)
@@ -260,7 +279,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       struct fuse_file_info *info, unsigned flags,
       const void *in_buf, size_t in_bufsize, size_t out_bufsize)
 {
-   struct stream_info *stream_info = &g_stream_info[info->fh];
+   struct cuse_stream_info *stream_info = &g_stream_info[info->fh];
 
    unsigned cmd = signed_cmd;
    int i = 0;
@@ -543,7 +562,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
    }
 }
 
-static void maru_update_pollhandle(struct stream_info *info, struct fuse_pollhandle *ph)
+static void maru_update_pollhandle(struct cuse_stream_info *info, struct fuse_pollhandle *ph)
 {
    struct fuse_pollhandle *tmp_ph = info->ph;
    info->ph = ph;
@@ -554,7 +573,7 @@ static void maru_update_pollhandle(struct stream_info *info, struct fuse_pollhan
 static void maru_poll(fuse_req_t req, struct fuse_file_info *info,
       struct fuse_pollhandle *ph)
 {
-   struct stream_info *stream_info = &g_stream_info[info->fh];
+   struct cuse_stream_info *stream_info = &g_stream_info[info->fh];
 
    pthread_mutex_lock(&stream_info->lock);
 
@@ -573,7 +592,7 @@ static void maru_poll(fuse_req_t req, struct fuse_file_info *info,
 
 static void maru_release(fuse_req_t req, struct fuse_file_info *info)
 {
-   struct stream_info *stream_info = &g_stream_info[info->fh];
+   struct cuse_stream_info *stream_info = &g_stream_info[info->fh];
 
    maru_stream_close(g_ctx, stream_info->stream);
 

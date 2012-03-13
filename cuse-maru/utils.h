@@ -1,6 +1,9 @@
 #ifndef MARU_UTILS_H__
 #define MARU_UTILS_H__
 
+/** \ingroup internal
+ * \brief Return next value that is power-of-two.
+ */
 static inline unsigned next_pot(unsigned v)
 {
    v--;

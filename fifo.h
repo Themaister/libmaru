@@ -39,7 +39,6 @@ void maru_fifo_free(maru_fifo *fifo);
  *
  * maru_fifo supports a notification handle that can be polled using
  * poll(), select() or similar calls to multiplex different buffers or other file descriptors.
- * The type of the handle may vary with the operating system used. \ref int.
  *
  * On Unix, the file descriptor can be polled with POLLIN or similar.
  * After an event has been read, and the user has performed the needed operations on the buffer,
