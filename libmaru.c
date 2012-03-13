@@ -15,60 +15,101 @@
 #include <sys/socket.h>
 #include <time.h>
 
+/** \ingroup lib
+ * \brief Struct holding information needed for a libusb transfer. */
 struct maru_transfer
 {
+   /** Underlying libusb transfer struct */
    struct libusb_transfer *trans;
 
+   /** Associated context */
    maru_context *ctx;
+   /** Associated stream */
    struct maru_stream_internal *stream;
 
+   /** Associated fifo region */
    struct maru_fifo_locked_region region;
 
+   /** Set if the transfer is currently queued up in libusb's event system. */
    bool active;
+   /** Set if transfer should not be queued up again.
+    * Used mostly for feedback endpoint. */
    bool block;
 
+   /** Capacity of embedded_data */
    size_t embedded_data_capacity;
+   /** Embeddable structure for use to transfer data that
+    * cannot be transfered contigously in region. */
    uint8_t embedded_data[];
 };
 
+/** \ingroup lib
+ * \brief Struct holding a list of active and vacant transfers for a stream. */
 struct transfer_list
 {
+   /** Vector of allocated transfers. */
    struct maru_transfer **transfers;
+   /** Capacity of transfers. */
    size_t capacity;
+   /** Size of transfers. */
    size_t size;
 };
 
+/** \ingroup lib
+ * \brief Struct holding information needed for a single stream. */
 struct maru_stream_internal
 {
+   /** The associated fifo of a stream. Set to NULL if a stream is not claimed. */
    maru_fifo *fifo;
+   /** Associated streaming endpoint of the stream. */
    unsigned stream_ep;
+   /** Associated feedback endpoint of the stream. */
    unsigned feedback_ep;
 
+   /** Fixed point transfer speed in audio frames / USB frame (16.16). */
    uint32_t transfer_speed;
+   /** Fraction that keeps track of when to send extra frames to keep up with transfer_speed. */
    uint32_t transfer_speed_fraction;
+   /** Multiplier for transfer_speed to convert frames to bytes. */
    unsigned transfer_speed_mult;
+   /** Bytes-per-second data rate for stream. */
    size_t bps;
 
+   /** Optional callback to notify write avail. */
    maru_notification_cb write_cb;
+   /** Userdata for write_cb */
    void *write_userdata;
+   /** Optional callbak to notify errors in stream. */
    maru_notification_cb error_cb;
+   /** Userdata for error_cb */
    void *error_userdata;
 
+   /** eventfd to synchronize tear-down of a stream. */
    int sync_fd;
 
+   /** Transfer list. */
    struct transfer_list trans;
+   /** Transfers currently queued up. */
    unsigned trans_count;
+   /** Maximum number of transfer allowed to be queued up. */
    unsigned enqueue_count;
 
+   /** \brief Timer to keep track of latency with higher accuracy than just polling buffer sizes will give us. */
    struct
    {
+      /** Set if timer is started, and start_time and offset have valid times. */
       bool started;
+      /** Time of timer start. */
       maru_usec start_time;
+      /** Timer offset. Used to combat clock skew. */
       maru_usec offset;
+      /** Total write count, used along with start_time to calculate latency. */
       uint64_t write_cnt;
    } timer;
 };
 
+/** \ingroup lib
+ * \brief Struct holding information in the libmaru context. */
 struct maru_context
 {
    libusb_context *ctx;
@@ -91,9 +132,6 @@ struct maru_context
    pthread_mutex_t lock;
    pthread_t thread;
    bool thread_dead;
-
-   size_t epoll_wait_cnt;
-   size_t libusb_call_cnt;
 
    struct
    {
@@ -959,7 +997,6 @@ static void *thread_entry(void *data)
       int num_events;
 
 poll_retry:
-      ctx->epoll_wait_cnt++;
       if ((num_events = epoll_wait(ctx->epfd, events, 16, -1)) < 0)
       {
          if (errno == EINTR)
@@ -988,7 +1025,6 @@ poll_retry:
 
       if (libusb_event)
       {
-         ctx->libusb_call_cnt++;
          if (libusb_handle_events_timeout(ctx->ctx, &(struct timeval) {0}) < 0)
          {
             fprintf(stderr, "libusb_handle_events_timeout() failed!\n");
@@ -1377,12 +1413,6 @@ void maru_destroy_context(maru_context *ctx)
 
    if (ctx->ctx)
       libusb_exit(ctx->ctx);
-
-#if 0
-   fprintf(stderr, "Performance count:\n");
-   fprintf(stderr, "epoll_wait() calls: %zu\n", ctx->epoll_wait_cnt);
-   fprintf(stderr, "libusb_handle_events() calls: %zu\n", ctx->libusb_call_cnt);
-#endif
 
    free(ctx);
 }
