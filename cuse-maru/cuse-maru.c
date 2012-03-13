@@ -680,7 +680,7 @@ int main(int argc, char *argv[])
       .hw_rate = 48000,
    };
 
-   char dev_name[128] = {0};
+   char dev_name[128] = {};
    const char *dev_info_argv[] = { dev_name };
 
    if (fuse_opt_parse(&args, &param, maru_opts, process_arg))

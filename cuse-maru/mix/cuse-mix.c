@@ -305,8 +305,8 @@ static bool ioctl_prep_uarg(fuse_req_t req,
       const void *in_buf, size_t in_bufsize, size_t out_bufsize)
 {
    bool retry = false;
-   struct iovec in_iov = {0};
-   struct iovec out_iov = {0};
+   struct iovec in_iov = {};
+   struct iovec out_iov = {};
 
    if (in)
    {
@@ -332,9 +332,7 @@ static bool ioctl_prep_uarg(fuse_req_t req,
          retry = true;
       }
       else
-      {
          assert(out_bufsize == out_size);
-      }
    }
 
    if (retry)
@@ -816,7 +814,7 @@ int main(int argc, char *argv[])
       .hw_rate = 48000,
    }; 
 
-   char dev_name[128] = {0};
+   char dev_name[128] = {};
    const char *dev_info_argv[] = { dev_name };
 
    if (fuse_opt_parse(&args, &param, maru_opts, process_arg))
