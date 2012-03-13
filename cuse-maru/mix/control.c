@@ -253,19 +253,18 @@ static void *thread_entry(void *data)
 
    sigaction(SIGPIPE, &(const struct sigaction) { .sa_handler = SIG_IGN }, NULL);
 
+#define MAX_EVENTS 16
    for (;;)
    {
-      int ret;
-      struct epoll_event events[16];
-poll_retry:
-      ret = epoll_wait(g_epfd, events, 16, -1);
+      struct epoll_event events[MAX_EVENTS];
+      int ret = epoll_wait(g_epfd, events, MAX_EVENTS, -1);
 
       if (ret < 0)
       {
          if (errno == EINTR)
-            goto poll_retry;
+            continue;
 
-         printf("epoll_wait failed!\n");
+         perror("epoll_wait");
          exit(1);
       }
 
@@ -301,7 +300,8 @@ static int create_unix_socket(const char *path)
       return -1;
    }
 
-   if (listen(fd, 4) < 0)
+#define MAX_LISTEN 4
+   if (listen(fd, MAX_LISTEN) < 0)
    {
       close(fd);
       return -1;
@@ -312,7 +312,7 @@ static int create_unix_socket(const char *path)
 
 bool start_control_thread(void)
 {
-   g_epfd = epoll_create(16);
+   g_epfd = epoll_create(MAX_EVENTS);
    if (g_epfd < 0)
    {
       perror("epoll_create");

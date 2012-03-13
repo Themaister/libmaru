@@ -165,6 +165,7 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
 
 static bool init_stream(struct stream_info *stream_info)
 {
+   // FIXME: stream_info->frags must be POT.
    maru_fifo *fifo = maru_fifo_new(stream_info->frags * stream_info->fragsize);
    if (!fifo)
       return false;
@@ -559,7 +560,6 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_SYNC
       case SNDCTL_DSP_SYNC:
       {
-         fprintf(stderr, "SYNC\n");
          if (ioctl(g_state.dev, SNDCTL_DSP_GETODELAY, &i) < 0)
          {
             fuse_reply_err(req, EINVAL);
@@ -575,7 +575,6 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          usleep(usec);
 
          IOCTL_RETURN_NULL();
-         fprintf(stderr, "SYNC END\n");
          break;
       }
 #endif
