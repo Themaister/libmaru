@@ -275,7 +275,7 @@ typedef void (*maru_notification_cb)(void *userdata);
  * \param size Size to write
  *
  * \returns Bytes written.
- * If returned amount is lower than size, an error occured, and return value reflect number of bytes written successfully.
+ * If returned amount is lower than size, an error occured, and return value reflects number of bytes written successfully.
  */
 size_t maru_stream_write(maru_context *ctx, maru_stream stream, 
       const void *data, size_t size);
