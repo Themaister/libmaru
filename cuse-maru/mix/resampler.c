@@ -35,7 +35,7 @@
 
 struct maru_resampler
 {
-   float phase_table[PHASES + 1][2][4 * SIDELOBES];
+   float phase_table[PHASES][2][2 * SIDELOBES];
    float buffer_l[2 * TAPS];
    float buffer_r[2 * TAPS];
 
