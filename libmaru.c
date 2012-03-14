@@ -1706,11 +1706,10 @@ static maru_error perform_request(maru_context *ctx,
          .events = POLLIN,
       };
 
-poll_retry:
       if (poll(&fds, 1, timeout < 0 ? -1 : timeout / 1000) < 0)
       {
          if (errno == EINTR)
-            goto poll_retry;
+            continue;
 
          return LIBMARU_ERROR_IO;
       }
