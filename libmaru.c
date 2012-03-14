@@ -24,6 +24,7 @@ struct maru_transfer
 
    /** Associated context */
    maru_context *ctx;
+
    /** Associated stream */
    struct maru_stream_internal *stream;
 
@@ -388,6 +389,7 @@ maru_error maru_list_audio_devices(struct maru_audio_device **audio_list,
       goto error;
 
    libusb_free_device_list(list, true);
+   libusb_exit(ctx);
    return LIBMARU_SUCCESS;
 
 error:
@@ -991,16 +993,16 @@ static void *thread_entry(void *data)
 
    bool alive = true;
 
+#define MAX_EVENTS 16
    while (alive)
    {
-      struct epoll_event events[16];
+      struct epoll_event events[MAX_EVENTS];
       int num_events;
 
-poll_retry:
-      if ((num_events = epoll_wait(ctx->epfd, events, 16, -1)) < 0)
+      if ((num_events = epoll_wait(ctx->epfd, events, MAX_EVENTS, -1)) < 0)
       {
          if (errno == EINTR)
-            goto poll_retry;
+            continue;
 
          perror("epoll_wait");
          break;
@@ -1439,6 +1441,7 @@ static bool parse_audio_format(const uint8_t *data, size_t length,
             ((header->bSamFreqType != USB_FREQ_TYPE_DIRECT) && (header->bSamFreqType != USB_FREQ_TYPE_DISCRETE)))
          continue;
 
+      // FIXME: Parse all sample rates correctly as separate stream descriptions.
       unsigned rate_start = header->bLength - sizeof(*header) - 3;
       // Use last format in list (somewhat hacky, will do for now ...)
       desc->sample_rate =
