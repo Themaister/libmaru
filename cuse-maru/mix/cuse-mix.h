@@ -5,7 +5,6 @@
 #include "resampler.h"
 #include <stdbool.h>
 #include <stdint.h>
-#include <samplerate.h>
 
 struct stream_info
 {
