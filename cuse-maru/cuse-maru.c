@@ -201,8 +201,8 @@ static void maru_write(fuse_req_t req, const char *data, size_t size, off_t off,
       fuse_reply_err(req, EIO);
    else
    {
-      fuse_reply_write(req, ret);
       stream_info->write_cnt += ret;
+      fuse_reply_write(req, ret);
    }
 }
 
@@ -311,7 +311,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_GETCAPS
       case SNDCTL_DSP_GETCAPS:
          PREP_UARG_OUT(&i);
-         i = DSP_CAP_REALTIME | (maru_get_num_streams(g_ctx) > 1 ? DSP_CAP_MULTI : 0);
+         i = DSP_CAP_REALTIME | DSP_CAP_TRIGGER | (maru_get_num_streams(g_ctx) > 1 ? DSP_CAP_MULTI : 0);
          IOCTL_RETURN(&i);
          break;
 #endif
@@ -464,9 +464,16 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_GETOPTR
       case SNDCTL_DSP_GETOPTR:
       {
-         size_t driver_write_cnt = stream_info->write_cnt;
-         driver_write_cnt -= stream_info->fragsize * stream_info->frags - 1;
-         driver_write_cnt += maru_stream_write_avail(g_ctx, stream_info->stream);
+         size_t driver_write_cnt = 0;
+
+         if (stream_info->stream != LIBMARU_STREAM_MASTER)
+         {
+            driver_write_cnt   = stream_info->write_cnt;
+            size_t write_avail = maru_stream_write_avail(g_ctx, stream_info->stream);
+            
+            driver_write_cnt  += write_avail;
+            driver_write_cnt  -= stream_info->fragsize * stream_info->frags - 1;
+         }
 
          count_info ci = {
             .bytes  = driver_write_cnt,
