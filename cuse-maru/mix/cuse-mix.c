@@ -396,7 +396,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_GETCAPS
       case SNDCTL_DSP_GETCAPS:
          PREP_UARG_OUT(&i);
-         i = DSP_CAP_REALTIME | DSP_CAP_MULTI | DSP_CAP_BATCH;
+         i = DSP_CAP_REALTIME | DSP_CAP_MULTI | DSP_CAP_BATCH | DSP_CAP_TRIGGER;
          IOCTL_RETURN(&i);
          break;
 #endif
