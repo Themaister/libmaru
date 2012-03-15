@@ -1,7 +1,7 @@
 #ifndef CUSE_MIX_H__
 #define CUSE_MIX_H__
 
-#include "../../fifo.h"
+#include <libmaru/fifo.h>
 #include "resampler.h"
 #include <stdbool.h>
 #include <stdint.h>

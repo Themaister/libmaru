@@ -1,7 +1,7 @@
 #ifndef RESAMPLER_H__
 #define RESAMPLER_H__
 
-#include "../../fifo.h"
+#include <libmaru/fifo.h>
 
 typedef struct maru_resampler maru_resampler_t;
 
