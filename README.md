@@ -9,21 +9,21 @@ libmaru is licensed under LGPLv2.1+ (same as libusb).
 
 ## Dependencies
 
-To build libmaru, you need to satisfy these dependencies:
-   - Linux 2.6.22+
-   - FUSE /w CUSE support
-   - libusb 1.0+
+To build libmaru, you need to satisfy these dependencies:<br/>
+   - Linux 2.6.22+<br/>
+   - FUSE /w CUSE support<br/>
+   - libusb 1.0+<br/>
 
 ## Building and installing
 
-After dependencies have been satisfied, it should be sufficient to build and install with:
-<tt>make</tt>
-<tt>make install PREFIX=$PREFIX</tt>
+After dependencies have been satisfied, it should be sufficient to build and install with:<br/>
+<tt>make</tt><br/>
+<tt>make install PREFIX=$PREFIX</tt><br/>
 
 ## Building documentation
 
 The public libmaru API is documented with doxygen.
-To build documentation, doxygen must be installed. Build documentation using:
+To build documentation, doxygen must be installed. Build documentation using:<br/>
 <tt>doxygen Doxyfile</tt>
 
 Documentation will be installed to doc/.
@@ -44,24 +44,24 @@ cuse-maru is licensed under GPLv3+.
 
 ## Building and installing
 
-<tt>cd cuse-maru</tt>
-<tt>make</tt>
-<tt>make install PREFIX=$PREFIX</tt>
+<tt>cd cuse-maru</tt><br/>
+<tt>make</tt><br/>
+<tt>make install PREFIX=$PREFIX</tt><br/>
 
 ## Running cuse-maru
 
 To run cuse-maru, cuse module must be loaded. /dev/cuse must also be writable by cuse-maru process.
 This can be set up with an udev rule, such as:
 
-<tt>KERNEL=="cuse", MODE="0660", GROUP="audio"</tt>
+<tt>KERNEL=="cuse", MODE="0660", GROUP="audio"</tt><br/>
 
 By default, cuse-maru will create the OSS device in /dev/maru.
 To automatically set permissions to this device, a similar rule can be created as such:
 
-<tt>KERNEL=="maru", MODE="0660", GROUP="audio"</tt>
+<tt>KERNEL=="maru", MODE="0660", GROUP="audio"</tt><br/>
 
 To add an automatic symlink to the device, i.e. /dev/dsp, it can be done as such:
-<tt>KERNEL=="maru", MODE="0660", SYMLINK+="dsp", GROUP="audio"</tt>
+<tt>KERNEL=="maru", MODE="0660", SYMLINK+="dsp", GROUP="audio"</tt><br/>
 
 ## Incompatibilities
 
@@ -86,9 +86,9 @@ If USB card doesn't support resampling and mixing, cuse-mix can be a viable alte
 
 ## Building and installing
 
-<tt>cd cuse-maru/mix</tt>
-<tt>make</tt>
-<tt>make install PREFIX=$PREFIX</tt>
+<tt>cd cuse-maru/mix</tt><br/>
+<tt>make</tt><br/>
+<tt>make install PREFIX=$PREFIX</tt><br/>
 
 ## Running cuse-mix
 
