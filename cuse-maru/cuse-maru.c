@@ -1,4 +1,4 @@
-#include <libmaru.h>
+#include <libmaru/libmaru.h>
 #include "utils.h"
 
 #include <sys/soundcard.h>

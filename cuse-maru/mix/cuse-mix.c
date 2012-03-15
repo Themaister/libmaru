@@ -1,4 +1,4 @@
-#include "../../fifo.h"
+#include <libmaru/fifo.h>
 #include "../utils.h"
 #include "cuse-mix.h"
 #include "mixthread.h"

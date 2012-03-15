@@ -2,10 +2,10 @@ TARGET := cuse-maru
 
 PREFIX = /usr/local
 
-CFLAGS += -O3 -g -pthread -std=gnu99 -Wall -I.. $(shell pkg-config libusb-1.0 fuse --cflags)
-LDFLAGS += -pthread $(shell pkg-config libusb-1.0 fuse --libs)
+CFLAGS += -O2 -g -pthread -std=gnu99 -Wall $(shell pkg-config libusb-1.0 fuse libmaru --cflags)
+LDFLAGS += -pthread $(shell pkg-config libusb-1.0 fuse libmaru --libs)
 
-SOURCES := $(wildcard *.c) $(wildcard ../*.c)
+SOURCES := $(wildcard *.c)
 OBJECTS := $(SOURCES:.c=.o)
 
 all: $(TARGET)
@@ -18,7 +18,7 @@ $(TARGET): $(OBJECTS)
 
 clean:
 	rm -f $(OBJECTS)
-	rm -f $(TARGETS)
+	rm -f $(TARGET)
 
 install:
 	install -m755 $(TARGET) $(PREFIX)/bin

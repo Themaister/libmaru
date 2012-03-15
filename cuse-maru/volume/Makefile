@@ -2,7 +2,7 @@ TARGET := cuse-volume
 
 PREFIX = /usr/local
 
-CFLAGS += -O3 -g -std=gnu99 -Wall
+CFLAGS += -O2 -g -std=gnu99 -Wall
 
 SOURCES := $(wildcard *.c)
 OBJECTS := $(SOURCES:.c=.o)
@@ -17,7 +17,7 @@ $(TARGET): $(OBJECTS)
 
 clean:
 	rm -f $(OBJECTS)
-	rm -f $(TARGETS)
+	rm -f $(TARGET)
 
 install:
 	install -m755 $(TARGET) $(PREFIX)/bin

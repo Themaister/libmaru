@@ -1,0 +1,12 @@
+prefix=PREFIXSTUB
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libmaru
+Description: Userspace USB audio class driver.
+Version: 0.1
+Requires:
+Conflicts:
+Libs: -L${libdir} -lmaru
+Cflags: -I${includedir}

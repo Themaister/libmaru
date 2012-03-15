@@ -2,10 +2,10 @@ TARGET := cuse-mix
 
 PREFIX = /usr/local
 
-CFLAGS += -O3 -g -pthread -std=gnu99 -Wall -march=native $(shell pkg-config fuse --cflags)
-LDFLAGS += -pthread $(shell pkg-config fuse --libs) -lm
+CFLAGS += -O2 -g -pthread -std=gnu99 -Wall $(shell pkg-config fuse libmaru --cflags)
+LDFLAGS += -pthread $(shell pkg-config fuse libmaru --libs) -lm
 
-SOURCES := $(wildcard *.c) ../../fifo.c
+SOURCES := $(wildcard *.c)
 OBJECTS := $(SOURCES:.c=.o)
 
 all: $(TARGET)
@@ -18,7 +18,7 @@ $(TARGET): $(OBJECTS)
 
 clean:
 	rm -f $(OBJECTS)
-	rm -f $(TARGETS)
+	rm -f $(TARGET)
 
 install:
 	install -m755 $(TARGET) $(PREFIX)/bin
