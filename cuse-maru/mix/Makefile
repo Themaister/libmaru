@@ -22,6 +22,7 @@ clean:
 
 install:
 	install -m755 $(TARGET) $(PREFIX)/bin
+	install -m755 gui/cuse-mixgui.py $(PREFIX)/bin/cuse-mixgui
 
 .PHONY: all clean install
 
