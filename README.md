@@ -94,6 +94,7 @@ If USB card doesn't support resampling and mixing, cuse-mix can be a viable alte
 
 Similar to cuse-maru.
 If cuse-mix is being used as the primary audio device, it might be an idea to symlink this to /dev/dsp rather than cuse-maru.
+By default, cuse-mix will create a device in /dev/marumix.
 
 ## Differences in implementation from cuse-maru
 
