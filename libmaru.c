@@ -114,7 +114,6 @@ struct maru_stream_internal
    /** Maximum number of transfer allowed to be queued up. */
    unsigned enqueue_count;
 
-   /** \brief Timer to keep track of latency with higher accuracy than just polling buffer sizes will give us. */
    struct
    {
       /** Set if timer is started, and start_time and offset have valid times. */
@@ -132,35 +131,57 @@ struct maru_stream_internal
  * \brief Struct holding information in the libmaru context. */
 struct maru_context
 {
+   /** Underlying libusb context */
    libusb_context *ctx;
+   /** libusb device handle to the audio card */
    libusb_device_handle *handle;
+   /** Cached configuration descriptor for audio card */
    struct libusb_config_descriptor *conf;
 
+   /** List of allocated streams */
    struct maru_stream_internal *streams;
+   /** Number of allocated hardware streams */
    unsigned num_streams;
+
+   /** Interface index for audio control interface */
    unsigned control_interface;
+   /** Interface index for audio streaming interface */
    unsigned stream_interface;
+   /** Altsetting for streaming interface */
    unsigned stream_altsetting;
 
+   /** File descriptor that thread polls for to tear down cleanly in maru_destroy_context(). */
    int quit_fd;
-   int notify_fd;
+   /** Socketpair to communicate control requests into and out of thread. */
    int request_fd[2];
-   uint64_t volume_count;
+   /** Number of control requests that have been made up to this point.
+    * Used to match requests with replies. */
+   uint64_t request_count;
 
+   /** epoll descriptor that thread polls on. */
    int epfd;
 
+   /** Context-global lock */
    pthread_mutex_t lock;
+   /** Thread */
    pthread_t thread;
+   /** Set to true if thread has died prematurely */
    bool thread_dead;
 
    struct
    {
+      /** Number of feature unit channels must be performed requests on */
       unsigned chans;
+      /** Feature unit channels */
       unsigned channels[8];
+      /** The feature unit that supports volume control for output stream */
       unsigned feature_unit;
    } volume;
 };
 
+// __attribute__((packed)) is a GNU extension.
+
+// USB audio spec structures.
 struct usb_uas_format_descriptor
 {
    uint8_t bLength;
@@ -227,24 +248,37 @@ struct usb_uac_feature_unit_descriptor
 #define UAC_OUTPUT_TERMINAL            0x03
 #define UAC_FEATURE_UNIT               0x06
 
+/** \ingroup lib
+ * \brief Struct holding data for a USB control request.
+ */
 struct maru_control_request
 {
+   /** Serialization count */
    uint64_t count;
 
+   /** USB control request type */
    uint8_t request_type;
+   /** USB control request */
    uint8_t request;
+   /** USB control value */
    uint16_t value;
+   /** USB control index */
    uint16_t index;
 
    struct
    {
+      /** Setup packet */
       uint8_t setup[sizeof(struct libusb_control_setup)];
+      /** Optional payload */
       uint8_t data[USB_MAX_CONTROL_SIZE];
    } __attribute__((packed)) data;
 
+   /** Size of transfer (wLength) */
    size_t size;
 
+   /** Error code */
    maru_error error;
+   /** Descriptor thread will reply on after finishing transfer */
    int reply_fd;
 };
 
@@ -1692,7 +1726,7 @@ static maru_error perform_request(maru_context *ctx,
       maru_usec timeout)
 {
    struct maru_control_request req = {
-      .count        = ctx->volume_count++,
+      .count        = ctx->request_count++,
 
       .request_type = request_type,
       .request      = request,
