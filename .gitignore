@@ -1,6 +1,6 @@
 /doc
 *.o
-*.so
+*.so*
 *.dylib
 *.dll
 /test/bin
