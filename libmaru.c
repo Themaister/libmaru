@@ -770,7 +770,7 @@ static bool enqueue_transfer(maru_context *ctx, struct maru_stream_internal *str
       transfer = create_transfer(&stream->trans, required_buffer);
 
    if (!transfer)
-      return NULL;
+      return false;
 
    transfer->stream = stream;
    transfer->ctx    = ctx;
