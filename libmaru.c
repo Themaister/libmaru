@@ -310,6 +310,15 @@ static int find_interface_class_index(const struct libusb_config_descriptor *con
 
 static bool parse_audio_format(const uint8_t *data, size_t size, struct maru_stream_desc *desc);
 
+static int perform_pitch_request(maru_context *ctx,
+      unsigned ep,
+      maru_usec timeout);
+
+static maru_error perform_rate_request(maru_context *ctx,
+      unsigned ep,
+      unsigned rate,
+      maru_usec timeout);
+
 static bool format_matches(const struct libusb_interface_descriptor *iface,
       const struct maru_stream_desc *desc)
 {
@@ -513,17 +522,13 @@ static inline void ctx_unlock(maru_context *ctx)
 static void poll_added_cb(int fd, short events, void *userdata)
 {
    maru_context *ctx = userdata;
-   ctx_lock(ctx);
    poll_list_add(ctx->epfd, fd, events);
-   ctx_unlock(ctx);
 }
 
 static void poll_removed_cb(int fd, void *userdata)
 {
    maru_context *ctx = userdata;
-   ctx_lock(ctx);
    poll_list_remove(ctx->epfd, fd);
-   ctx_unlock(ctx);
 }
 
 static bool poll_list_init(maru_context *ctx)
@@ -580,7 +585,6 @@ static void poll_list_deinit(maru_context *ctx)
 static struct maru_stream_internal *fd_to_stream(maru_context *ctx, int fd)
 {
    struct maru_stream_internal *ret = NULL;
-   ctx_lock(ctx);
 
    for (unsigned i = 0; i < ctx->num_streams; i++)
    {
@@ -592,7 +596,6 @@ static struct maru_stream_internal *fd_to_stream(maru_context *ctx, int fd)
       }
    }
 
-   ctx_unlock(ctx);
    return ret;
 }
 
@@ -1121,6 +1124,9 @@ static bool init_stream_nolock(maru_context *ctx,
    if (str->sync_fd < 0)
       return false;
 
+   if (perform_rate_request(ctx, str->stream_ep, desc->sample_rate, 1000000) != LIBMARU_SUCCESS)
+      return false;
+
    if (str->feedback_ep && !enqueue_feedback_transfer(ctx, str))
       return false;
 
@@ -1153,16 +1159,6 @@ static bool init_stream_nolock(maru_context *ctx,
       str->fifo = NULL;
       return false;
    }
-
-#if 0
-   if (maru_fifo_set_write_trigger(str->fifo,
-            frag_size) < 0)
-   {
-      maru_fifo_free(str->fifo);
-      str->fifo = NULL;
-      return false;
-   }
-#endif
 
    poll_list_add(ctx->epfd,
          maru_fifo_read_notify_fd(str->fifo), POLLIN);
@@ -1206,10 +1202,6 @@ static void deinit_stream(maru_context *ctx, maru_stream stream)
    deinit_stream_nolock(ctx, stream);
    ctx_unlock(ctx);
 }
-
-static int perform_pitch_request(maru_context *ctx,
-      unsigned ep,
-      maru_usec timeout);
 
 static bool enumerate_endpoints(maru_context *ctx, const struct libusb_config_descriptor *cdesc)
 {
@@ -1792,6 +1784,19 @@ static int perform_pitch_request(maru_context *ctx,
          UAS_PITCH_CONTROL << 8,
          ep,
          (uint8_t[]) {1}, sizeof(uint8_t), timeout < 0 ? -1 : timeout / 1000);
+}
+
+static maru_error perform_rate_request(maru_context *ctx,
+      unsigned ep,
+      unsigned rate,
+      maru_usec timeout)
+{
+   return perform_request(ctx,
+         LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_ENDPOINT,
+         USB_REQUEST_UAC_SET_CUR,
+         UAS_FREQ_CONTROL << 8,
+         ep,
+         (uint8_t[]) { rate >> 0, rate >> 8, rate >> 16 }, 3, timeout);
 }
 
 static maru_error perform_volume_request(maru_context *ctx,
