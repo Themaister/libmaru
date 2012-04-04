@@ -350,7 +350,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_SPEED
       case SNDCTL_DSP_SPEED:
          PREP_UARG_INOUT(&i, &i);
-         i = stream_info->sample_rate; // Hack for now.
+         stream_info->sample_rate = i; // TODO: Check validity more rigorously.
          IOCTL_RETURN(&i);
          break;
 #endif
