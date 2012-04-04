@@ -1791,12 +1791,40 @@ static maru_error perform_rate_request(maru_context *ctx,
       unsigned rate,
       maru_usec timeout)
 {
-   return perform_request(ctx,
+   maru_error err = perform_request(ctx,
          LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_ENDPOINT,
          USB_REQUEST_UAC_SET_CUR,
          UAS_FREQ_CONTROL << 8,
          ep,
          (uint8_t[]) { rate >> 0, rate >> 8, rate >> 16 }, 3, timeout);
+
+   if (err != LIBMARU_SUCCESS)
+      return err;
+
+   uint8_t new_rate_raw[3];
+   err = perform_request(ctx,
+         LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_ENDPOINT,
+         USB_REQUEST_UAC_GET_CUR,
+         UAS_FREQ_CONTROL << 8,
+         ep,
+         new_rate_raw, sizeof(new_rate_raw), timeout);
+
+   if (err != LIBMARU_SUCCESS)
+      return err;
+
+   unsigned new_rate =
+      (new_rate_raw[0] <<  0) |
+      (new_rate_raw[1] <<  8) |
+      (new_rate_raw[2] << 16);
+
+   if (new_rate != rate)
+   {
+      fprintf(stderr, "[libmaru]: Requested %u Hz, got %u Hz.\n",
+            rate, new_rate);
+      return LIBMARU_ERROR_INVALID;
+   }
+
+   return LIBMARU_SUCCESS;
 }
 
 static maru_error perform_volume_request(maru_context *ctx,
