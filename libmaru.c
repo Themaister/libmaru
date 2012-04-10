@@ -1216,7 +1216,7 @@ static bool find_interface_endpoints(maru_context *ctx,
       }
    }
 
-   return false;
+   return true;
 }
 
 static bool enumerate_stream_interfaces(maru_context *ctx,
@@ -1378,17 +1378,18 @@ find_master_volume_feature_unit(const uint8_t *extra, size_t extra_length)
 }
 
 static void parse_feature_unit(struct volume_control *vol,
-      const struct usb_uac_feature_unit_descriptor *desc)
+      const struct usb_uac_feature_unit_descriptor *feature)
 {
-   ctx->volume.feature_unit = feature->bUnitID;
+   memset(vol, 0, sizeof(*vol));
+   vol->feature_unit = feature->bUnitID;
 
    unsigned control_len = feature->bLength - 7;
 
    // Find the two first channels that have volume control, and assume they map to left/right.
-   for (unsigned i = 0; i < control_len && ctx->volume.chans < 2; i += feature->bControlSize)
+   for (unsigned i = 0; i < control_len && vol->chans < 2; i += feature->bControlSize)
    {
       if (feature->bmaControls[i] & USB_UAC_VOLUME_SELECTOR)
-         ctx->volume.channels[ctx->volume.chans++] = i / feature->bControlSize;
+         vol->channels[vol->chans++] = i / feature->bControlSize;
    }
 
 #if 0
@@ -1430,6 +1431,8 @@ static bool enumerate_controls(maru_context *ctx)
 
    for (unsigned i = 0; i < ctx->num_streams; i++)
       enumerate_stream_controls(ctx, i);
+
+   return true;
 }
 
 maru_error maru_create_context_from_vid_pid(maru_context **ctx,
