@@ -86,6 +86,11 @@ struct maru_stream_internal
    /** Associated feedback endpoint of the stream. */
    unsigned feedback_ep;
 
+   /** Interface index for audio streaming interface */
+   unsigned stream_interface;
+   /** Altsetting for streaming interface */
+   unsigned stream_altsetting;
+
    /** Fixed point transfer speed in audio frames / USB frame (16.16). */
    uint32_t transfer_speed;
    /** Fraction that keeps track of when to send extra frames to keep up with transfer_speed. */
@@ -145,10 +150,6 @@ struct maru_context
 
    /** Interface index for audio control interface */
    unsigned control_interface;
-   /** Interface index for audio streaming interface */
-   unsigned stream_interface;
-   /** Altsetting for streaming interface */
-   unsigned stream_altsetting;
 
    /** File descriptor that thread polls for to tear down cleanly in maru_destroy_context(). */
    int quit_fd;
@@ -282,7 +283,7 @@ struct maru_control_request
 
 static int find_interface_class_index(const struct libusb_config_descriptor *conf,
       unsigned class, unsigned subclass,
-      unsigned min_eps, int *altsetting)
+      unsigned min_eps)
 {
    for (unsigned i = 0; i < conf->bNumInterfaces; i++)
    {
@@ -294,12 +295,7 @@ static int find_interface_class_index(const struct libusb_config_descriptor *con
          if (desc->bInterfaceClass == class &&
                desc->bInterfaceSubClass == subclass &&
                desc->bNumEndpoints >= min_eps)
-         {
-            if (altsetting)
-               *altsetting = j;
-
             return i;
-         }
       }
    }
 
@@ -338,36 +334,10 @@ static bool format_matches(const struct libusb_interface_descriptor *iface,
    return true;
 }
 
-static int find_stream_interface_alt(const struct libusb_config_descriptor *conf,
-      const struct maru_stream_desc *format_desc, int *altsetting)
-{
-   for (unsigned i = 0; i < conf->bNumInterfaces; i++)
-   {
-      for (int j = 0; j < conf->interface[i].num_altsetting; j++)
-      {
-         const struct libusb_interface_descriptor *desc =
-            &conf->interface[i].altsetting[j];
-
-         if (desc->bInterfaceClass == USB_CLASS_AUDIO &&
-               desc->bInterfaceSubClass == USB_SUBCLASS_AUDIO_STREAMING &&
-               desc->bNumEndpoints >= 1 &&
-               format_matches(desc, format_desc))
-         {
-            if (altsetting)
-               *altsetting = j;
-
-            return i;
-         }
-      }
-   }
-
-   return -1;
-}
-
 static bool conf_is_audio_class(const struct libusb_config_descriptor *conf)
 {
    return find_interface_class_index(conf, USB_CLASS_AUDIO,
-         USB_SUBCLASS_AUDIO_STREAMING, 1, NULL) >= 0;
+         USB_SUBCLASS_AUDIO_STREAMING, 1) >= 0;
 }
 
 static bool device_is_audio_class(libusb_device *dev)
@@ -1093,7 +1063,9 @@ static void *thread_entry(void *data)
    return NULL;
 }
 
-static bool add_stream(maru_context *ctx, unsigned stream_ep, unsigned feedback_ep)
+static bool add_stream(maru_context *ctx,
+      unsigned interface, unsigned altsetting,
+      unsigned stream_ep, unsigned feedback_ep)
 {
    struct maru_stream_internal *new_streams = realloc(ctx->streams, (ctx->num_streams + 1) * sizeof(*ctx->streams));
    if (!new_streams)
@@ -1104,6 +1076,8 @@ static bool add_stream(maru_context *ctx, unsigned stream_ep, unsigned feedback_
    ctx->streams[ctx->num_streams] = (struct maru_stream_internal) {
       .stream_ep = stream_ep,
       .feedback_ep = feedback_ep,
+      .stream_interface = interface,
+      .stream_altsetting = altsetting,
       .sync_fd = -1,
    };
 
@@ -1200,23 +1174,56 @@ static void deinit_stream(maru_context *ctx, maru_stream stream)
    ctx_unlock(ctx);
 }
 
-static bool enumerate_endpoints(maru_context *ctx, const struct libusb_config_descriptor *cdesc)
+static bool find_interface_endpoints(maru_context *ctx,
+      unsigned interface,
+      unsigned altsetting,
+      const struct libusb_interface_descriptor *iface)
 {
-   const struct libusb_interface_descriptor *desc =
-      &cdesc->interface[ctx->stream_interface].altsetting[ctx->stream_altsetting];
-
-   for (unsigned i = 0; i < desc->bNumEndpoints; i++)
+   for (unsigned i = 0; i < iface->bNumEndpoints; i++)
    {
-      const struct libusb_endpoint_descriptor *endp = &desc->endpoint[i];
+      const struct libusb_endpoint_descriptor *endp =
+         &iface->endpoint[i];
 
       if (endp->bEndpointAddress < 0x80 &&
-            (endp->bmAttributes & USB_ENDPOINT_ISOCHRONOUS))
+            endp->bmAttributes & USB_ENDPOINT_ISOCHRONOUS)
       {
-         if (!add_stream(ctx, endp->bEndpointAddress, endp->bSynchAddress))
-            return false;
-
          if (endp->bmAttributes & USB_ENDPOINT_ADAPTIVE)
-            perform_pitch_request(ctx, endp->bEndpointAddress, 100000);
+            perform_pitch_request(ctx,
+                  endp->bEndpointAddress, 100000);
+
+         return add_stream(ctx,
+                  interface, altsetting,
+                  endp->bEndpointAddress,
+                  endp->bSynchAddress);
+      }
+   }
+
+   return false;
+}
+
+static bool enumerate_stream_interfaces(maru_context *ctx,
+      const struct maru_stream_desc *desc)
+{
+   for (unsigned i = 0; i < ctx->conf->bNumInterfaces; i++)
+   {
+      unsigned altsettings =
+         ctx->conf->interface[i].num_altsetting;
+
+      for (unsigned j = 0; j < altsettings; j++)
+      {
+         const struct libusb_interface_descriptor *iface =
+            &ctx->conf->interface[i].altsetting[j];
+
+         if (iface->bInterfaceClass == USB_CLASS_AUDIO &&
+               iface->bInterfaceSubClass == USB_SUBCLASS_AUDIO_STREAMING &&
+               iface->bNumEndpoints >= 1 &&
+               format_matches(iface, desc))
+         {
+            if (!find_interface_endpoints(ctx, i, j, iface))
+               return false;
+
+            break;
+         }
       }
    }
 
@@ -1229,44 +1236,37 @@ static bool enumerate_streams(maru_context *ctx,
    struct libusb_config_descriptor *conf = ctx->conf;
 
    int ctrl_index = find_interface_class_index(conf,
-         USB_CLASS_AUDIO, USB_SUBCLASS_AUDIO_CONTROL, 0, NULL);
+         USB_CLASS_AUDIO, USB_SUBCLASS_AUDIO_CONTROL, 0);
 
-   int altsetting = 0;
-
-   int stream_index = find_stream_interface_alt(conf,
-         desc, &altsetting);
-
-   if (ctrl_index < 0 || stream_index < 0)
+   if (ctrl_index < 0)
       return false;
 
    ctx->control_interface = ctrl_index;
-   ctx->stream_interface = stream_index;
-   ctx->stream_altsetting = altsetting;
 
-#if 0
-   fprintf(stderr, "Found interface CTRL: %d, STREAM: %d(%d)\n", ctrl_index, stream_index, altsetting);
-#endif
+   if (!enumerate_stream_interfaces(ctx, desc))
+      return false;
 
-   int ifaces[2] = { ctrl_index, stream_index };
-   for (unsigned i = 0; i < 2; i++)
+   if (libusb_kernel_driver_active(ctx->handle, ctrl_index))
    {
-      if (libusb_kernel_driver_active(ctx->handle,
-               ifaces[i]))
-      {
-         if (libusb_detach_kernel_driver(ctx->handle,
-                  ifaces[i]) < 0)
-            return false;
-      }
-
-      if (libusb_claim_interface(ctx->handle, ifaces[i]) < 0)
+      if (libusb_detach_kernel_driver(ctx->handle, ctrl_index) < 0 ||
+            libusb_claim_interface(ctx->handle, ctrl_index) < 0)
          return false;
    }
 
-   if (libusb_set_interface_alt_setting(ctx->handle, stream_index, altsetting) < 0)
-      return false;
+   for (unsigned i = 0; i < ctx->num_streams; i++)
+   {
+      unsigned iface = ctx->streams[i].stream_interface;
+      unsigned altsetting = ctx->streams[i].stream_altsetting;
 
-   if (!enumerate_endpoints(ctx, conf))
-      return false;
+      if (libusb_kernel_driver_active(ctx->handle, iface) && libusb_detach_kernel_driver(ctx->handle, iface) < 0)
+         return false;
+
+      if (libusb_claim_interface(ctx->handle, iface) < 0)
+         return false;
+
+      if (libusb_set_interface_alt_setting(ctx->handle, iface, altsetting) < 0)
+         return false;
+   }
 
    return true;
 }
@@ -1448,9 +1448,13 @@ void maru_destroy_context(maru_context *ctx)
    if (ctx->handle)
    {
       libusb_release_interface(ctx->handle, ctx->control_interface);
-      libusb_release_interface(ctx->handle, ctx->stream_interface);
       libusb_attach_kernel_driver(ctx->handle, ctx->control_interface);
-      libusb_attach_kernel_driver(ctx->handle, ctx->stream_interface);
+
+      for (unsigned i = 0; i < ctx->num_streams; i++)
+      {
+         libusb_release_interface(ctx->handle, ctx->streams[i].stream_interface);
+         libusb_attach_kernel_driver(ctx->handle, ctx->streams[i].stream_interface);
+      }
 
       libusb_close(ctx->handle);
    }
@@ -1519,12 +1523,13 @@ static bool parse_audio_format(const uint8_t *data, size_t length,
    return false;
 }
 
-static bool fill_audio_format(maru_context *ctx, struct maru_stream_desc *desc)
+static bool fill_audio_format(maru_context *ctx, maru_stream stream, struct maru_stream_desc *desc)
 {
    // Format descriptors are not standard (class specific),
    // so we poke in the extra descriptors.
 
-   const struct libusb_interface_descriptor *iface = &ctx->conf->interface[ctx->stream_interface].altsetting[ctx->stream_altsetting];
+   const struct libusb_interface_descriptor *iface =
+      &ctx->conf->interface[ctx->streams[stream].stream_interface].altsetting[ctx->streams[stream].stream_altsetting];
    return parse_audio_format(iface->extra, iface->extra_length, desc);
 }
 
@@ -1540,7 +1545,7 @@ maru_error maru_get_stream_desc(maru_context *ctx,
       goto error;
 
    // Assume for now that all streams have same audio format.
-   if (!fill_audio_format(ctx, audio_desc))
+   if (!fill_audio_format(ctx, stream, audio_desc))
       goto error;
 
    *desc = audio_desc;
