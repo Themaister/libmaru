@@ -230,8 +230,6 @@ struct usb_uac_feature_unit_descriptor
 #define USB_INTERFACE_DESCRIPTOR_TYPE  0x04
 #define USB_FORMAT_DESCRIPTOR_SUBTYPE  0x02
 #define USB_FORMAT_TYPE_I              0x01
-#define USB_FREQ_TYPE_DIRECT           0x01
-#define USB_FREQ_TYPE_DISCRETE         0x02
 
 #define USB_AUDIO_FEEDBACK_SIZE        3
 #define USB_MAX_CONTROL_SIZE           64
@@ -710,13 +708,12 @@ static void transfer_feedback_cb(struct libusb_transfer *trans)
 
    if (trans->status == LIBUSB_TRANSFER_COMPLETED)
    {
-      // TODO: Verify how this really works. Seems like voodoo magic at first glance.
       uint32_t fraction = 
-         (trans->buffer[0] << 16) |
+         (trans->buffer[0] <<  0) |
          (trans->buffer[1] <<  8) |
-         (trans->buffer[2] <<  0);
+         (trans->buffer[2] << 16);
 
-      fraction >>= 2;
+      fraction <<= 2;
 
       transfer->stream->transfer_speed_fraction =
          transfer->stream->transfer_speed = fraction;
@@ -1482,21 +1479,40 @@ static bool parse_audio_format(const uint8_t *data, size_t length,
 
       if (header->bDescriptorType != (USB_CLASS_DESCRIPTOR | USB_INTERFACE_DESCRIPTOR_TYPE) ||
             header->bDescriptorSubtype != USB_FORMAT_DESCRIPTOR_SUBTYPE ||
-            header->bFormatType != USB_FORMAT_TYPE_I ||
-            ((header->bSamFreqType != USB_FREQ_TYPE_DIRECT) && (header->bSamFreqType != USB_FREQ_TYPE_DISCRETE)))
+            header->bFormatType != USB_FORMAT_TYPE_I)
          continue;
-
-      // FIXME: Parse all sample rates correctly as separate stream descriptions.
-      unsigned rate_start = header->bLength - sizeof(*header) - 3;
-      // Use last format in list (somewhat hacky, will do for now ...)
-      desc->sample_rate =
-         (header->tSamFreq[rate_start + 0] <<  0) |
-         (header->tSamFreq[rate_start + 1] <<  8) |
-         (header->tSamFreq[rate_start + 2] << 16);
 
       desc->channels = header->bNrChannels;
       desc->bits = header->nBitResolution;
-      desc->sample_rate_min = desc->sample_rate_max = 0;
+
+      if (header->bSamFreqType == 0) // Continous
+      {
+         desc->sample_rate = 0;
+
+         desc->sample_rate_min =
+            (header->tSamFreq[0] <<  0) |
+            (header->tSamFreq[1] <<  8) |
+            (header->tSamFreq[2] << 16);
+
+         desc->sample_rate_max =
+            (header->tSamFreq[3] <<  0) |
+            (header->tSamFreq[4] <<  8) |
+            (header->tSamFreq[5] << 16);
+      }
+      else
+      {
+         // FIXME: Parse all sample rates correctly as separate stream descriptions.
+         // Use last format in list (somewhat hacky, will do for now ...)
+         unsigned rate_start = 3 * (header->bSamFreqType - 1);
+
+         desc->sample_rate =
+            (header->tSamFreq[rate_start + 0] <<  0) |
+            (header->tSamFreq[rate_start + 1] <<  8) |
+            (header->tSamFreq[rate_start + 2] << 16);
+
+         desc->sample_rate_min = desc->sample_rate_max = 0;
+      }
+
       return true;
    }
 
