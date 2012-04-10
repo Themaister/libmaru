@@ -132,6 +132,20 @@ struct maru_stream_internal
    } timer;
 };
 
+
+/** \ingroup lib
+ * \brief Struct holding information needed for volume handling of a channel.
+ */
+struct volume_control
+{
+   /** Number of feature unit channels must be performed requests on */
+   unsigned chans;
+   /** Feature unit channels */
+   unsigned channels[8];
+   /** The feature unit that supports volume control for output stream */
+   unsigned feature_unit;
+};
+
 /** \ingroup lib
  * \brief Struct holding information in the libmaru context. */
 struct maru_context
@@ -169,15 +183,8 @@ struct maru_context
    /** Set to true if thread has died prematurely */
    bool thread_dead;
 
-   struct
-   {
-      /** Number of feature unit channels must be performed requests on */
-      unsigned chans;
-      /** Feature unit channels */
-      unsigned channels[8];
-      /** The feature unit that supports volume control for output stream */
-      unsigned feature_unit;
-   } volume;
+   /** Volume control for master channel. */
+   struct volume_control volume;
 };
 
 // __attribute__((packed)) is a GNU extension.
@@ -195,6 +202,16 @@ struct usb_uas_format_descriptor
    uint8_t bSamFreqType;
    uint8_t tSamFreq[];
 } __attribute__((packed));
+
+struct usb_uas_interface_descriptor
+{
+   uint8_t  bLength;
+   uint8_t  bDescriptorType;
+   uint8_t  bDescriptorSubtype;
+   uint8_t  bTerminalLink;
+   uint8_t  bDelay;
+   uint16_t wFormatTag;
+};
 
 struct usb_uac_output_terminal_descriptor
 {
@@ -229,6 +246,7 @@ struct usb_uac_feature_unit_descriptor
 
 #define USB_CLASS_DESCRIPTOR           0x20
 #define USB_INTERFACE_DESCRIPTOR_TYPE  0x04
+#define USB_GENERAL_DESCRIPTOR_SUBTYPE 0x01
 #define USB_FORMAT_DESCRIPTOR_SUBTYPE  0x02
 #define USB_FORMAT_TYPE_I              0x01
 
@@ -1274,6 +1292,47 @@ static bool enumerate_streams(maru_context *ctx,
 static struct usb_uac_feature_unit_descriptor*
 find_volume_feature_unit(const uint8_t *extra, size_t extra_length)
 {
+   int term = -1;
+
+   struct usb_uas_interface_descriptor *desc = NULL;
+   for (size_t i = 0; i < extra_length; i += desc->bLength)
+   {
+      desc = (struct usb_uas_interface_descriptor*)&extra[i];
+      if (desc->bLength != sizeof(*desc))
+         continue;
+
+      if (desc->bDescriptorType !=
+            (USB_CLASS_DESCRIPTOR | USB_INTERFACE_DESCRIPTOR_TYPE) ||
+            desc->bDescriptorSubtype != USB_GENERAL_DESCRIPTOR_SUBTYPE)
+         continue;
+
+      term = desc->bTerminalLink;
+   }
+
+   if (term < 0)
+      return NULL;
+
+   struct usb_uac_feature_unit_descriptor *feature = NULL;
+
+   for (size_t i = 0; i < extra_length; i += feature->bLength)
+   {
+      feature = (struct usb_uac_feature_unit_descriptor*)&extra[i];
+
+      if (feature->bLength < sizeof(*feature))
+         continue;
+
+      if (feature->bDescriptorSubtype == UAC_FEATURE_UNIT &&
+            feature->bSourceID == term &&
+            feature->bControlSize)
+         return feature;
+   }
+
+   return NULL;
+}
+
+static struct usb_uac_feature_unit_descriptor*
+find_master_volume_feature_unit(const uint8_t *extra, size_t extra_length)
+{
    int id = -1;
    struct usb_uac_output_terminal_descriptor *desc = NULL;
 
@@ -1318,16 +1377,9 @@ find_volume_feature_unit(const uint8_t *extra, size_t extra_length)
    return NULL;
 }
 
-static bool enumerate_controls(maru_context *ctx)
+static void parse_feature_unit(struct volume_control *vol,
+      const struct usb_uac_feature_unit_descriptor *desc)
 {
-   const struct libusb_interface_descriptor *desc = &ctx->conf->interface[ctx->control_interface].altsetting[0];
-
-   struct usb_uac_feature_unit_descriptor *feature =
-      find_volume_feature_unit(desc->extra, desc->extra_length);
-
-   if (!feature)
-      return false;
-
    ctx->volume.feature_unit = feature->bUnitID;
 
    unsigned control_len = feature->bLength - 7;
@@ -1346,8 +1398,38 @@ static bool enumerate_controls(maru_context *ctx)
    for (unsigned i = 0; i < ctx->volume.chans; i++)
       fprintf(stderr, "\t\tChan #%u: %u\n", i, ctx->volume.channels[i]);
 #endif
+}
+
+static bool enumerate_master_controls(maru_context *ctx)
+{
+   const struct libusb_interface_descriptor *desc =
+      &ctx->conf->interface[ctx->control_interface].altsetting[0];
+
+   struct usb_uac_feature_unit_descriptor *feature =
+      find_master_volume_feature_unit(desc->extra, desc->extra_length);
+
+   if (!feature)
+      return false;
+
+   parse_feature_unit(&ctx->volume, feature);
 
    return true;
+}
+
+static void enumerate_stream_controls(maru_context *ctx,
+      maru_stream stream)
+{
+   const struct libusb_interface_descriptor *desc =
+      &ctx->conf->interface[ctx->control_interface].altsetting[0];
+}
+
+static bool enumerate_controls(maru_context *ctx)
+{
+   if (!enumerate_master_controls(ctx))
+      return false;
+
+   for (unsigned i = 0; i < ctx->num_streams; i++)
+      enumerate_stream_controls(ctx, i);
 }
 
 maru_error maru_create_context_from_vid_pid(maru_context **ctx,
