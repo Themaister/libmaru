@@ -76,6 +76,19 @@ struct transfer_list
 };
 
 /** \ingroup lib
+ * \brief Struct holding information needed for volume handling of a channel.
+ */
+struct volume_control
+{
+   /** Number of feature unit channels must be performed requests on */
+   unsigned chans;
+   /** Feature unit channels */
+   unsigned channels[8];
+   /** The feature unit that supports volume control for output stream */
+   unsigned feature_unit;
+};
+
+/** \ingroup lib
  * \brief Struct holding information needed for a single stream. */
 struct maru_stream_internal
 {
@@ -130,21 +143,10 @@ struct maru_stream_internal
       /** Total write count, used along with start_time to calculate latency. */
       uint64_t write_cnt;
    } timer;
+
+   struct volume_control volume;
 };
 
-
-/** \ingroup lib
- * \brief Struct holding information needed for volume handling of a channel.
- */
-struct volume_control
-{
-   /** Number of feature unit channels must be performed requests on */
-   unsigned chans;
-   /** Feature unit channels */
-   unsigned channels[8];
-   /** The feature unit that supports volume control for output stream */
-   unsigned feature_unit;
-};
 
 /** \ingroup lib
  * \brief Struct holding information in the libmaru context. */
@@ -1290,14 +1292,16 @@ static bool enumerate_streams(maru_context *ctx,
 }
 
 static struct usb_uac_feature_unit_descriptor*
-find_volume_feature_unit(const uint8_t *extra, size_t extra_length)
+find_volume_feature_unit(
+      const uint8_t *ctrl_extra,  size_t ctrl_extra_length,
+      const uint8_t *iface_extra, size_t iface_extra_length)
 {
    int term = -1;
 
    struct usb_uas_interface_descriptor *desc = NULL;
-   for (size_t i = 0; i < extra_length; i += desc->bLength)
+   for (size_t i = 0; i < iface_extra_length; i += desc->bLength)
    {
-      desc = (struct usb_uas_interface_descriptor*)&extra[i];
+      desc = (struct usb_uas_interface_descriptor*)&iface_extra[i];
       if (desc->bLength != sizeof(*desc))
          continue;
 
@@ -1314,9 +1318,9 @@ find_volume_feature_unit(const uint8_t *extra, size_t extra_length)
 
    struct usb_uac_feature_unit_descriptor *feature = NULL;
 
-   for (size_t i = 0; i < extra_length; i += feature->bLength)
+   for (size_t i = 0; i < ctrl_extra_length; i += feature->bLength)
    {
-      feature = (struct usb_uac_feature_unit_descriptor*)&extra[i];
+      feature = (struct usb_uac_feature_unit_descriptor*)&ctrl_extra[i];
 
       if (feature->bLength < sizeof(*feature))
          continue;
@@ -1420,8 +1424,19 @@ static bool enumerate_master_controls(maru_context *ctx)
 static void enumerate_stream_controls(maru_context *ctx,
       maru_stream stream)
 {
-   const struct libusb_interface_descriptor *desc =
+   const struct libusb_interface_descriptor *iface =
+      &ctx->conf->interface[ctx->streams[stream].stream_interface].altsetting[ctx->streams[stream].stream_altsetting];
+
+   const struct libusb_interface_descriptor *ctrl =
       &ctx->conf->interface[ctx->control_interface].altsetting[0];
+
+   struct usb_uac_feature_unit_descriptor *feature =
+      find_volume_feature_unit(iface->extra, iface->extra_length, ctrl->extra, ctrl->extra_length);
+
+   if (!feature)
+      return;
+
+   parse_feature_unit(&ctx->streams[stream].volume, feature);
 }
 
 static bool enumerate_controls(maru_context *ctx)
@@ -1934,19 +1949,20 @@ static maru_error perform_rate_request(maru_context *ctx,
 }
 
 static maru_error perform_volume_request(maru_context *ctx,
+      const struct volume_control *ctrl,
       maru_volume *vol, uint8_t request, maru_usec timeout)
 {
-   if (ctx->volume.chans == 0)
+   if (ctrl->chans == 0)
       return LIBMARU_ERROR_INVALID;
 
    uint16_t swapped = libusb_cpu_to_le16(*vol);
 
-   for (unsigned i = 0; i < ctx->volume.chans; i++)
+   for (unsigned i = 0; i < ctrl->chans; i++)
    {
       maru_error err = perform_request(ctx,
             LIBUSB_REQUEST_TYPE_CLASS | LIBUSB_RECIPIENT_INTERFACE, request,
-            (USB_UAC_VOLUME_SELECTOR << 8) | ctx->volume.channels[i],
-            (ctx->volume.feature_unit << 8) | ctx->control_interface,
+            (USB_UAC_VOLUME_SELECTOR << 8) | ctrl->channels[i],
+            (ctrl->feature_unit << 8) | ctx->control_interface,
             &swapped, sizeof(swapped), timeout);
 
       if (err != LIBMARU_SUCCESS)
@@ -1957,18 +1973,28 @@ static maru_error perform_volume_request(maru_context *ctx,
    return LIBMARU_SUCCESS;
 }
 
+const struct volume_control *stream_to_volume_control(maru_context *ctx, maru_stream stream)
+{
+   if (stream == LIBMARU_STREAM_MASTER)
+      return &ctx->volume;
+   else if (stream < ctx->num_streams)
+      return &ctx->streams[stream].volume;
+
+   return NULL;
+}
+
 maru_error maru_stream_get_volume(maru_context *ctx,
       maru_stream stream,
       maru_volume *current, maru_volume *min, maru_volume *max,
       maru_usec timeout)
 {
-   // Only support master channel volume for now.
-   if (stream != LIBMARU_STREAM_MASTER)
+   const struct volume_control *ctrl = stream_to_volume_control(ctx, stream);
+   if (!ctrl)
       return LIBMARU_ERROR_INVALID;
 
    if (current)
    {
-      maru_error err = perform_volume_request(ctx, current,
+      maru_error err = perform_volume_request(ctx, ctrl, current,
             USB_REQUEST_UAC_GET_CUR, timeout);
 
       if (err != LIBMARU_SUCCESS)
@@ -1977,7 +2003,7 @@ maru_error maru_stream_get_volume(maru_context *ctx,
 
    if (min)
    {
-      maru_error err = perform_volume_request(ctx, min,
+      maru_error err = perform_volume_request(ctx, ctrl, min,
             USB_REQUEST_UAC_GET_MIN, timeout);
 
       if (err != LIBMARU_SUCCESS)
@@ -1986,7 +2012,7 @@ maru_error maru_stream_get_volume(maru_context *ctx,
 
    if (max)
    {
-      maru_error err = perform_volume_request(ctx, max,
+      maru_error err = perform_volume_request(ctx, ctrl, max,
             USB_REQUEST_UAC_GET_MAX, timeout);
 
       if (err != LIBMARU_SUCCESS)
@@ -2001,11 +2027,11 @@ maru_error maru_stream_set_volume(maru_context *ctx,
       maru_volume volume,
       maru_usec timeout)
 {
-   // Only support master channel volume for now.
-   if (stream != LIBMARU_STREAM_MASTER)
+   const struct volume_control *ctrl = stream_to_volume_control(ctx, stream);
+   if (!ctrl)
       return LIBMARU_ERROR_INVALID;
 
-   return perform_volume_request(ctx, &volume, USB_REQUEST_UAC_SET_CUR, timeout);
+   return perform_volume_request(ctx, ctrl, &volume, USB_REQUEST_UAC_SET_CUR, timeout);
 }
 
 // Estimate current audio latency using high-precision timers.
