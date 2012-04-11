@@ -14,8 +14,9 @@
  *  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <libmaru/libmaru.h>
 #include "utils.h"
+#include "control.h"
+#include "cuse-maru.h"
 
 #include <sys/soundcard.h>
 #include <cuse_lowlevel.h>
@@ -33,53 +34,31 @@
 #include <signal.h>
 #include <assert.h>
 
-#define MAX_STREAMS 8
-
-static maru_context *g_ctx;
-static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static maru_volume g_min_volume;
-static maru_volume g_max_volume;
-static int g_sample_rate;
-static int g_frags;
-static int g_fragsize;
-
-/** \ingroup internal
- * \brief Structure holding information about a libmaru stream. */
-struct cuse_stream_info
-{
-   /** Set to true if stream is claimed by a file descriptor. */
-   bool active;
-
-   /** libmaru stream. Set to LIBMARU_STREAM_MASTER during configuration stage (before first write()). */
-   maru_stream stream;
-   /** Lock to let polling notifications occur in a different thread. */
-   pthread_mutex_t lock;
-   /** Currently held pollhandle. */
-   struct fuse_pollhandle *ph;
-
-   /** Set if stream has an error. */
-   volatile sig_atomic_t error;
-
-   /** Current sample rate for stream. */
-   int sample_rate;
-   /** Current number of audio channels for stream. */
-   int channels;
-   /** Current number of bits in the little-endian PCM format. */
-   int bits;
-
-   /** HW fragment size. */
-   int fragsize;
-   /** HW frags. */
-   int frags;
-
-   /** Set if SNDCTL_DSP_NONBLOCK has been explicitly called. */
-   bool nonblock;
-
-   /** Number of bytes written to current stream. (Wraps around at 2^32 according to OSS API). */
-   uint32_t write_cnt;
+struct cuse_maru_state g_state = {
+   .lock = PTHREAD_MUTEX_INITIALIZER,
 };
 
-static struct cuse_stream_info g_stream_info[MAX_STREAMS];
+static void get_process_name(char *name, size_t size, pid_t pid)
+{
+   if (size == 0)
+      return;
+
+   char proc_path[PATH_MAX];
+   snprintf(proc_path, sizeof(proc_path), "/proc/%lu/cmdline", (unsigned long)pid);
+   int fd = open(proc_path, O_RDONLY);
+   if (fd < 0)
+   {
+      snprintf(name, size, "Unknown");
+      return;
+   }
+
+   ssize_t ret = read(fd, name, size - 1);
+   if (ret < 0)
+      ret = 0;
+
+   name[ret] = '\0';
+   close(fd);
+}
 
 static void maru_open(fuse_req_t req, struct fuse_file_info *info)
 {
@@ -90,18 +69,18 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
    }
 
    bool found = false;
-   pthread_mutex_lock(&g_lock);
+   pthread_mutex_lock(&g_state.lock);
    for (unsigned i = 0; i < MAX_STREAMS; i++)
    {
-      if (!g_stream_info[i].active)
+      if (!g_state.stream_info[i].active)
       {
-         g_stream_info[i].active = true;
+         g_state.stream_info[i].active = true;
          info->fh = i;
          found = true;
          break;
       }
    }
-   pthread_mutex_unlock(&g_lock);
+   pthread_mutex_unlock(&g_state.lock);
 
    if (!found)
    {
@@ -109,18 +88,25 @@ static void maru_open(fuse_req_t req, struct fuse_file_info *info)
       return;
    }
 
-   struct cuse_stream_info *stream_info = &g_stream_info[info->fh];
+   struct cuse_stream_info *stream_info = &g_state.stream_info[info->fh];
 
    pthread_mutex_init(&stream_info->lock, NULL);
 
    // Just set some defaults.
-   stream_info->sample_rate = g_sample_rate;
+   stream_info->sample_rate = g_state.sample_rate;
    stream_info->channels = 2;
    stream_info->bits = 16;
    stream_info->stream = LIBMARU_STREAM_MASTER; // Invalid stream for writing.
 
-   stream_info->fragsize = g_fragsize;
-   stream_info->frags = g_frags;
+   stream_info->fragsize = g_state.fragsize;
+   stream_info->frags = g_state.frags;
+
+   const struct fuse_ctx *ctx = fuse_req_ctx(req);
+   if (ctx)
+   {
+      get_process_name(stream_info->process_name,
+            sizeof(stream_info->process_name), ctx->pid);
+   }
 
    info->nonseekable = 1;
    info->direct_io = 1;
@@ -144,11 +130,11 @@ static void write_notification_cb(void *data)
 
 static bool init_stream(struct cuse_stream_info *info)
 {
-   int stream = maru_find_available_stream(g_ctx);
+   int stream = maru_find_available_stream(g_state.ctx);
    if (stream < 0)
       return false;
 
-   maru_error err = maru_stream_open(g_ctx, stream,
+   maru_error err = maru_stream_open(g_state.ctx, stream,
          &(const struct maru_stream_desc) {
             .sample_rate   = info->sample_rate,
             .channels      = info->channels,
@@ -160,7 +146,7 @@ static bool init_stream(struct cuse_stream_info *info)
    if (err != LIBMARU_SUCCESS)
       return false;
 
-   maru_stream_set_write_notification(g_ctx, stream, write_notification_cb, info);
+   maru_stream_set_write_notification(g_state.ctx, stream, write_notification_cb, info);
 
    info->stream = stream;
    return true;
@@ -169,7 +155,7 @@ static bool init_stream(struct cuse_stream_info *info)
 static void maru_write(fuse_req_t req, const char *data, size_t size, off_t off,
       struct fuse_file_info *info)
 {
-   struct cuse_stream_info *stream_info = &g_stream_info[info->fh];
+   struct cuse_stream_info *stream_info = &g_state.stream_info[info->fh];
 
    if (stream_info->error)
    {
@@ -195,7 +181,7 @@ static void maru_write(fuse_req_t req, const char *data, size_t size, off_t off,
    size_t to_write;
    if (nonblock)
    {
-      to_write = maru_stream_write_avail(g_ctx, stream_info->stream);
+      to_write = maru_stream_write_avail(g_state.ctx, stream_info->stream);
       unsigned frame_size = stream_info->channels * stream_info->bits / 8;
       to_write /= frame_size;
       to_write *= frame_size;
@@ -211,7 +197,7 @@ static void maru_write(fuse_req_t req, const char *data, size_t size, off_t off,
       return;
    }
 
-   size_t ret = maru_stream_write(g_ctx, stream_info->stream, data, to_write);
+   size_t ret = maru_stream_write(g_state.ctx, stream_info->stream, data, to_write);
 
    if (ret == 0)
       fuse_reply_err(req, EIO);
@@ -220,6 +206,56 @@ static void maru_write(fuse_req_t req, const char *data, size_t size, off_t off,
       stream_info->write_cnt += ret;
       fuse_reply_write(req, ret);
    }
+}
+
+bool set_volume(struct cuse_stream_info *stream_info,
+      int volume)
+{
+   maru_volume min = g_state.min_volume;
+   maru_volume max = g_state.max_volume;
+
+   maru_volume vol = LIBMARU_VOLUME_MUTE;
+   int i = volume;
+
+   if (i > 0)
+      vol = (max * i + min * (100 - i)) / 100;
+
+   if (vol < min && i > 0)
+      vol = min;
+   else if (vol > max)
+      vol = max;
+
+   if (maru_stream_set_volume(g_state.ctx, stream_info->stream,
+            vol, 0) != LIBMARU_SUCCESS)
+      return false;
+
+   stream_info->vol = vol;
+   return true;
+}
+
+bool read_volume(struct cuse_stream_info *stream_info)
+{
+   maru_volume cur;
+   maru_volume min = g_state.min_volume;
+   maru_volume max = g_state.max_volume;
+
+   if (maru_stream_get_volume(g_state.ctx, stream_info->stream,
+            &cur, NULL, NULL, 50000) != LIBMARU_SUCCESS)
+      return false;
+
+   int i = 0;
+
+   if (min >= max)
+      i = 100;
+   else if (cur < min)
+      i = 0;
+   else if (cur > max)
+      i = 100;
+   else
+      i = (100 * (cur - min)) / (max - min);
+
+   stream_info->vol = i;
+   return true;
 }
 
 /** \ingroup cuse
@@ -295,7 +331,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       struct fuse_file_info *info, unsigned flags,
       const void *in_buf, size_t in_bufsize, size_t out_bufsize)
 {
-   struct cuse_stream_info *stream_info = &g_stream_info[info->fh];
+   struct cuse_stream_info *stream_info = &g_state.stream_info[info->fh];
 
    unsigned cmd = signed_cmd;
    int i = 0;
@@ -327,7 +363,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_GETCAPS
       case SNDCTL_DSP_GETCAPS:
          PREP_UARG_OUT(&i);
-         i = DSP_CAP_REALTIME | DSP_CAP_TRIGGER | (maru_get_num_streams(g_ctx) > 1 ? DSP_CAP_MULTI : 0);
+         i = DSP_CAP_REALTIME | DSP_CAP_TRIGGER | (maru_get_num_streams(g_state.ctx) > 1 ? DSP_CAP_MULTI : 0);
          IOCTL_RETURN(&i);
          break;
 #endif
@@ -339,7 +375,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #endif
          if (stream_info->stream != LIBMARU_STREAM_MASTER)
          {
-            maru_stream_close(g_ctx, stream_info->stream);
+            maru_stream_close(g_state.ctx, stream_info->stream);
             stream_info->stream = LIBMARU_STREAM_MASTER;
             stream_info->write_cnt = 0;
          }
@@ -398,7 +434,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       {
          size_t write_avail = stream_info->fragsize * stream_info->frags - 1;
          if (stream_info->stream != LIBMARU_STREAM_MASTER)
-            write_avail = maru_stream_write_avail(g_ctx, stream_info->stream);
+            write_avail = maru_stream_write_avail(g_state.ctx, stream_info->stream);
 
          audio_buf_info audio_info = {
             .bytes      = write_avail,
@@ -452,7 +488,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       case SNDCTL_DSP_GETODELAY:
       {
          PREP_UARG_OUT(&i);
-         maru_usec lat = maru_stream_current_latency(g_ctx, stream_info->stream);
+         maru_usec lat = maru_stream_current_latency(g_state.ctx, stream_info->stream);
 
          if (lat < 0)
             i = 0;
@@ -469,7 +505,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       case SNDCTL_DSP_SYNC:
          if (stream_info->stream != LIBMARU_STREAM_MASTER)
          {
-            maru_usec lat = maru_stream_current_latency(g_ctx, stream_info->stream);
+            maru_usec lat = maru_stream_current_latency(g_state.ctx, stream_info->stream);
             if (lat >= 0)
                usleep(lat);
          }
@@ -485,7 +521,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          if (stream_info->stream != LIBMARU_STREAM_MASTER)
          {
             driver_write_cnt   = stream_info->write_cnt;
-            size_t write_avail = maru_stream_write_avail(g_ctx, stream_info->stream);
+            size_t write_avail = maru_stream_write_avail(g_state.ctx, stream_info->stream);
             
             driver_write_cnt  += write_avail;
             driver_write_cnt  -= stream_info->fragsize * stream_info->frags - 1;
@@ -512,23 +548,13 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          PREP_UARG_INOUT(&i, &i);
          int left = i & 0xff;
 
-         maru_volume min = g_min_volume;
-         maru_volume max = g_max_volume;
-
-         maru_volume vol = LIBMARU_VOLUME_MUTE;
-         if (i > 0)
-            vol = (max * left + min * (100 - left)) / 100;
-
-         if (vol < min && i > 0)
-            vol = min;
-         else if (vol > max)
-            vol = max;
-
-         if (maru_stream_set_volume(g_ctx, LIBMARU_STREAM_MASTER, vol, 0) != LIBMARU_SUCCESS)
+         pthread_mutex_lock(&g_state.lock);
+         if (!set_volume(stream_info, left))
          {
             fuse_reply_err(req, EIO);
             break;
          }
+         pthread_mutex_unlock(&g_state.lock);
 
          i = (left << 8) | left;
          IOCTL_RETURN(&i);
@@ -542,25 +568,16 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       case SNDCTL_DSP_GETPLAYVOL:
          PREP_UARG_OUT(&i);
 
-         maru_volume cur;
-         maru_volume min = g_min_volume;
-         maru_volume max = g_max_volume;
-
-         if (maru_stream_get_volume(g_ctx, LIBMARU_STREAM_MASTER,
-                  &cur, NULL, NULL, 50000) != LIBMARU_SUCCESS)
+         pthread_mutex_lock(&g_state.lock);
+         if (!read_volume(stream_info))
          {
             fuse_reply_err(req, EIO);
             break;
          }
+         pthread_mutex_unlock(&g_state.lock);
 
-         if (min >= max)
-            i = 100;
-         else if (cur < min)
-            i = 0;
-         else if (cur > max)
-            i = 100;
-         else
-            i = (100 * (cur - min)) / (max - min);
+         i = stream_info->vol;
+         i |= i << 8;
 
          IOCTL_RETURN(&i);
          break;
@@ -596,7 +613,7 @@ static void maru_update_pollhandle(struct cuse_stream_info *info, struct fuse_po
 static void maru_poll(fuse_req_t req, struct fuse_file_info *info,
       struct fuse_pollhandle *ph)
 {
-   struct cuse_stream_info *stream_info = &g_stream_info[info->fh];
+   struct cuse_stream_info *stream_info = &g_state.stream_info[info->fh];
 
    pthread_mutex_lock(&stream_info->lock);
 
@@ -604,7 +621,7 @@ static void maru_poll(fuse_req_t req, struct fuse_file_info *info,
 
    if (stream_info->error)
       fuse_reply_poll(req, POLLHUP);
-   else if (stream_info->stream == LIBMARU_STREAM_MASTER || maru_stream_write_avail(g_ctx, stream_info->stream))
+   else if (stream_info->stream == LIBMARU_STREAM_MASTER || maru_stream_write_avail(g_state.ctx, stream_info->stream))
       fuse_reply_poll(req, POLLOUT);
    else
       fuse_reply_poll(req, 0);
@@ -615,9 +632,9 @@ static void maru_poll(fuse_req_t req, struct fuse_file_info *info,
 
 static void maru_release(fuse_req_t req, struct fuse_file_info *info)
 {
-   struct cuse_stream_info *stream_info = &g_stream_info[info->fh];
+   struct cuse_stream_info *stream_info = &g_state.stream_info[info->fh];
 
-   maru_stream_close(g_ctx, stream_info->stream);
+   maru_stream_close(g_state.ctx, stream_info->stream);
 
    if (stream_info->ph)
       fuse_pollhandle_destroy(stream_info->ph);
@@ -713,9 +730,9 @@ int main(int argc, char *argv[])
    }
    fuse_opt_add_arg(&args, "-f");
 
-   g_frags = next_pot(param.hw_frags);
-   g_fragsize = next_pot(param.hw_fragsize);
-   g_sample_rate = param.hw_rate;
+   g_state.frags = next_pot(param.hw_frags);
+   g_state.fragsize = next_pot(param.hw_fragsize);
+   g_state.sample_rate = param.hw_rate;
 
    snprintf(dev_name, sizeof(dev_name), "DEVNAME=%s", param.dev_name ? param.dev_name : "maru");
 
@@ -740,7 +757,7 @@ int main(int argc, char *argv[])
    device = list[0];
    free(list);
 
-   err = maru_create_context_from_vid_pid(&g_ctx, device.vendor_id, device.product_id,
+   err = maru_create_context_from_vid_pid(&g_state.ctx, device.vendor_id, device.product_id,
          &(const struct maru_stream_desc) { .bits = 16, .channels = 2 });
 
    if (err != LIBMARU_SUCCESS)
@@ -749,14 +766,17 @@ int main(int argc, char *argv[])
       return 1;
    }
 
-   if (maru_stream_get_volume(g_ctx, LIBMARU_STREAM_MASTER,
-            NULL, &g_min_volume, &g_max_volume, 50000) != LIBMARU_SUCCESS)
+   if (maru_stream_get_volume(g_state.ctx, LIBMARU_STREAM_MASTER,
+            NULL, &g_state.min_volume, &g_state.max_volume, 50000) != LIBMARU_SUCCESS)
    {
       return 1;
    }
 
+   if (!start_control_thread())
+      return 1;
+
    int ret = cuse_lowlevel_main(args.argc, args.argv, &ci, &maru_op, NULL);
-   maru_destroy_context(g_ctx);
+   maru_destroy_context(g_state.ctx);
    return ret;
 }
 

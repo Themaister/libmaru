@@ -118,7 +118,7 @@ class Control(Gtk.VBox):
 class Window(Gtk.Window):
    def __init__(self):
       Gtk.Window.__init__(self, title = "MARU Volume Control")
-      self.conn = Connection("/tmp/marumix")
+      self.conn = Connection("/tmp/maru")
       self.set_border_width(5)
 
       vbox = Gtk.VBox()

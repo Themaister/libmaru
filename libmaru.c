@@ -213,7 +213,7 @@ struct usb_uas_interface_descriptor
    uint8_t  bTerminalLink;
    uint8_t  bDelay;
    uint16_t wFormatTag;
-};
+} __attribute__((packed));
 
 struct usb_uac_output_terminal_descriptor
 {
@@ -1302,15 +1302,15 @@ find_volume_feature_unit(
    for (size_t i = 0; i < iface_extra_length; i += desc->bLength)
    {
       desc = (struct usb_uas_interface_descriptor*)&iface_extra[i];
+
       if (desc->bLength != sizeof(*desc))
          continue;
 
-      if (desc->bDescriptorType !=
-            (USB_CLASS_DESCRIPTOR | USB_INTERFACE_DESCRIPTOR_TYPE) ||
-            desc->bDescriptorSubtype != USB_GENERAL_DESCRIPTOR_SUBTYPE)
+      if (desc->bDescriptorSubtype != USB_GENERAL_DESCRIPTOR_SUBTYPE)
          continue;
 
       term = desc->bTerminalLink;
+      break;
    }
 
    if (term < 0)
@@ -1398,10 +1398,10 @@ static void parse_feature_unit(struct volume_control *vol,
 
 #if 0
    fprintf(stderr, "Enumerated controls:\n");
-   fprintf(stderr, "\tUnit: %u\n", ctx->volume.feature_unit);
-   fprintf(stderr, "\tChans: %u\n", ctx->volume.chans);
-   for (unsigned i = 0; i < ctx->volume.chans; i++)
-      fprintf(stderr, "\t\tChan #%u: %u\n", i, ctx->volume.channels[i]);
+   fprintf(stderr, "\tUnit: %u\n", vol->feature_unit);
+   fprintf(stderr, "\tChans: %u\n", vol->chans);
+   for (unsigned i = 0; i < vol->chans; i++)
+      fprintf(stderr, "\t\tChan #%u: %u\n", i, vol->channels[i]);
 #endif
 }
 
@@ -1431,7 +1431,7 @@ static void enumerate_stream_controls(maru_context *ctx,
       &ctx->conf->interface[ctx->control_interface].altsetting[0];
 
    struct usb_uac_feature_unit_descriptor *feature =
-      find_volume_feature_unit(iface->extra, iface->extra_length, ctrl->extra, ctrl->extra_length);
+      find_volume_feature_unit(ctrl->extra, ctrl->extra_length, iface->extra, iface->extra_length);
 
    if (!feature)
       return;
