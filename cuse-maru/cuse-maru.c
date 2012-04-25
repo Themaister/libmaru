@@ -621,7 +621,8 @@ static void maru_poll(fuse_req_t req, struct fuse_file_info *info,
 
    if (stream_info->error)
       fuse_reply_poll(req, POLLHUP);
-   else if (stream_info->stream == LIBMARU_STREAM_MASTER || maru_stream_write_avail(g_state.ctx, stream_info->stream))
+   else if (stream_info->stream == LIBMARU_STREAM_MASTER ||
+         maru_stream_write_avail(g_state.ctx, stream_info->stream) >= stream_info->fragsize)
       fuse_reply_poll(req, POLLOUT);
    else
       fuse_reply_poll(req, 0);
