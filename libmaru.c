@@ -1141,10 +1141,16 @@ static bool init_stream_nolock(maru_context *ctx,
    if (!str->fifo)
       return false;
 
-   size_t read_trigger = frag_size;
-
    if (maru_fifo_set_read_trigger(str->fifo,
-            read_trigger) < 0)
+            frag_size) < 0)
+   {
+      maru_fifo_free(str->fifo);
+      str->fifo = NULL;
+      return false;
+   }
+
+   if (maru_fifo_set_write_trigger(str->fifo,
+            frag_size) < 0)
    {
       maru_fifo_free(str->fifo);
       str->fifo = NULL;
