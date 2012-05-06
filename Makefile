@@ -5,7 +5,7 @@ SONAME_SHORT := libmaru.so
 PREFIX = /usr/local
 
 CFLAGS += -O2 -g -pthread -fPIC -std=gnu99 -Wall -I.. $(shell pkg-config libusb-1.0 fuse --cflags)
-LDFLAGS += -shared -pthread -fPIC $(shell pkg-config libusb-1.0 fuse --libs) -Wl,-no-undefined -Wl,-soname,$(SONAME)
+LDFLAGS += -shared -pthread -fPIC $(shell pkg-config libusb-1.0 fuse --libs) -lrt -Wl,-no-undefined -Wl,-soname,$(SONAME)
 
 SOURCES := $(wildcard *.c)
 OBJECTS := $(SOURCES:.c=.o)
