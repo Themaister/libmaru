@@ -717,7 +717,7 @@ int main(int argc, char *argv[])
    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
    struct maru_param param = {
       .hw_frags = 4,
-      .hw_fragsize = 4096,
+      .hw_fragsize = 16 * 1024,
       .hw_rate = 48000,
    };
 
