@@ -402,7 +402,8 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 #ifdef SNDCTL_DSP_GETCAPS
       case SNDCTL_DSP_GETCAPS:
          PREP_UARG_OUT(&i);
-         i = DSP_CAP_REALTIME | DSP_CAP_TRIGGER | (maru_get_num_streams(g_state.ctx) > 1 ? DSP_CAP_MULTI : 0);
+         i = DSP_CAP_REALTIME | DSP_CAP_TRIGGER |
+            (maru_get_num_streams(g_state.ctx) > 1 ? DSP_CAP_MULTI : 0);
          IOCTL_RETURN(&i);
          break;
 #endif
@@ -424,10 +425,50 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 
 #ifdef SNDCTL_DSP_SPEED
       case SNDCTL_DSP_SPEED:
+      {
          PREP_UARG_INOUT(&i, &i);
-         stream_info->sample_rate = i; // TODO: Check validity more rigorously.
+
+         maru_stream stream = stream_info->stream;
+         if (stream == LIBMARU_STREAM_MASTER)
+         {
+            int ret = maru_find_available_stream(g_state.ctx);
+            if (ret < 0)
+            {
+               fuse_reply_err(req, EBUSY);
+               break;
+            }
+
+            stream = ret;
+         }
+
+         struct maru_stream_desc *tmp_desc = NULL;
+         unsigned num_desc = 0;
+         if (maru_get_stream_desc(g_state.ctx, stream, &tmp_desc, &num_desc) < 0 || num_desc == 0)
+         {
+            fuse_reply_err(req, ENOMEM);
+            break;
+         }
+
+         // Only check first descriptor.
+         // TODO: Check more rigorously.
+         struct maru_stream_desc desc = tmp_desc[0];
+         free(tmp_desc);
+
+         // Adjust sample rate if it is not supported by hardware.
+         if (desc.sample_rate && i != (int)desc.sample_rate)
+            i = desc.sample_rate;
+         else
+         {
+            if (i > (int)desc.sample_rate_max)
+               i = desc.sample_rate_max;
+            else if (i < (int)desc.sample_rate_min)
+               i = desc.sample_rate_min;
+         }
+
+         stream_info->sample_rate = i;
          IOCTL_RETURN(&i);
          break;
+      }
 #endif
 
 #ifdef SNDCTL_GETFMTS
