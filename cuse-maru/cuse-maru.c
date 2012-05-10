@@ -327,6 +327,33 @@ static bool ioctl_prep_uarg(fuse_req_t req,
 #define PREP_UARG_OUT(outp) PREP_UARG(NULL, 0, outp, sizeof(*(outp)))
 #define PREP_UARG_INOUT(inp, outp) PREP_UARG(inp, sizeof(*(inp)), outp, sizeof(*(outp)))
 
+#if 0
+#define DECL_IOCTL_NAME(io) { io, #io }
+struct
+{
+   unsigned cmd;
+   const char *id;
+} static const ioctl_name[] = {
+   DECL_IOCTL_NAME(OSS_GETVERSION),
+   DECL_IOCTL_NAME(SNDCTL_DSP_GETCAPS),
+   DECL_IOCTL_NAME(SNDCTL_DSP_NONBLOCK),
+   DECL_IOCTL_NAME(SNDCTL_DSP_RESET),
+   DECL_IOCTL_NAME(SNDCTL_DSP_SPEED),
+   DECL_IOCTL_NAME(SNDCTL_DSP_GETFMTS),
+   DECL_IOCTL_NAME(SNDCTL_DSP_SETFMT),
+   DECL_IOCTL_NAME(SNDCTL_DSP_CHANNELS),
+   DECL_IOCTL_NAME(SNDCTL_DSP_STEREO),
+   DECL_IOCTL_NAME(SNDCTL_DSP_GETOSPACE),
+   DECL_IOCTL_NAME(SNDCTL_DSP_GETBLKSIZE),
+   DECL_IOCTL_NAME(SNDCTL_DSP_SETFRAGMENT),
+   DECL_IOCTL_NAME(SNDCTL_DSP_GETODELAY),
+   DECL_IOCTL_NAME(SNDCTL_DSP_SYNC),
+   DECL_IOCTL_NAME(SNDCTL_DSP_GETOPTR),
+   DECL_IOCTL_NAME(SNDCTL_DSP_POST),
+   { 0, NULL },
+};
+#endif
+
 static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
       struct fuse_file_info *info, unsigned flags,
       const void *in_buf, size_t in_bufsize, size_t out_bufsize)
@@ -335,6 +362,18 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
 
    unsigned cmd = signed_cmd;
    int i = 0;
+
+#if 0
+   fprintf(stderr, "ioctl(): %u\n", cmd);
+   for (unsigned i = 0; ioctl_name[i].cmd; i++)
+   {
+      if (ioctl_name[i].cmd == cmd)
+      {
+         fprintf(stderr, "\tName: %s\n", ioctl_name[i].id);
+         break;
+      }
+   }
+#endif
 
    switch (cmd)
    {
