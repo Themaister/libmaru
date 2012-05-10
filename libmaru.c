@@ -344,8 +344,16 @@ static bool format_matches(const struct libusb_interface_descriptor *iface,
    if (!desc)
       return true;
 
-   if (desc->sample_rate && desc->sample_rate != format_desc.sample_rate)
-      return false;
+   if (desc->sample_rate)
+   {
+      if (format_desc.sample_rate && desc->sample_rate != format_desc.sample_rate)
+         return false;
+      else if (!format_desc.sample_rate &&
+            (desc->sample_rate < format_desc.sample_rate_min ||
+             desc->sample_rate > format_desc.sample_rate_max))
+         return false;
+   }
+
    if (desc->channels && desc->channels != format_desc.channels)
       return false;
    if (desc->bits && desc->bits != format_desc.bits)
@@ -1111,6 +1119,12 @@ static bool init_stream_nolock(maru_context *ctx,
 {
    struct maru_stream_internal *str = &ctx->streams[stream];
 
+   const struct libusb_interface_descriptor *iface =
+      &ctx->conf->interface[str->stream_interface].altsetting[str->stream_altsetting];
+
+   if (!format_matches(iface, desc))
+      return false;
+
    str->sync_fd = eventfd(0, 0);
    if (str->sync_fd < 0)
       return false;
@@ -1650,7 +1664,6 @@ maru_error maru_get_stream_desc(maru_context *ctx,
    if (!audio_desc)
       goto error;
 
-   // Assume for now that all streams have same audio format.
    if (!fill_audio_format(ctx, stream, audio_desc))
       goto error;
 

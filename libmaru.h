@@ -257,7 +257,7 @@ maru_error maru_get_stream_desc(maru_context *ctx, maru_stream stream,
  * \param ctx libmaru context
  * \param stream Stream index to use. Must be an available stream.
  * \ref maru_is_stream_available maru_find_available_stream
- * \param desc
+ * \param desc The stream format to be used.
  *
  * \returns Error code \ref maru_error
  */
