@@ -2,7 +2,7 @@ TARGET := cuse-mix
 
 PREFIX = /usr/local
 
-CFLAGS += -O2 -g -pthread -std=gnu99 -Wall $(shell pkg-config fuse libmaru --cflags)
+CFLAGS += -O0 -g -pthread -std=gnu99 -Wall $(shell pkg-config fuse libmaru --cflags)
 LDFLAGS += -pthread $(shell pkg-config fuse libmaru --libs) -lm
 
 SOURCES := $(wildcard *.c)

@@ -457,7 +457,7 @@ static void maru_ioctl(fuse_req_t req, int signed_cmd, void *uarg,
          // Adjust sample rate if it is not supported by hardware.
          if (desc.sample_rate && i != (int)desc.sample_rate)
             i = desc.sample_rate;
-         else
+         else if (!desc.sample_rate)
          {
             if (i > (int)desc.sample_rate_max)
                i = desc.sample_rate_max;
