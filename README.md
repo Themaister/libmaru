@@ -3,6 +3,14 @@
 libmaru is a library that can take control of a USB audio device, and use it directly as an audio playback device.
 The implementation resides entirely in userspace, and uses libusb 1.0 to communicate with the device.
 
+## MARUSS
+
+MARUSS is a project that implements a USB sound card on an Altera DE2 development board.
+It features hardware mixing and resampling.
+
+The public project report is found [here](https://github.com/downloads/Themaister/libmaru/report.pdf).
+The appendices for the report as well as source code for MARUSS can be found [here](https://github.com/downloads/Themaister/libmaru/MARUSS.zip).
+
 ## Licensing
 
 libmaru is licensed under LGPLv2.1+ (same as libusb).
