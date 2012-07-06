@@ -1789,7 +1789,7 @@ maru_error maru_stream_close(maru_context *ctx,
 static maru_usec current_time(void)
 {
    struct timespec tv;
-   clock_gettime(CLOCK_MONOTONIC_RAW, &tv);
+   clock_gettime(CLOCK_MONOTONIC, &tv);
 
    maru_usec time = tv.tv_sec * INT64_C(1000000);
    time += tv.tv_nsec / 1000;
